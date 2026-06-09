@@ -701,6 +701,28 @@ type NotificationsConfig struct {
 	// OnError gates the errored notification (a background session entered
 	// Error). Default: true (nil = true).
 	OnError *bool `toml:"on_error"`
+
+	// ITermClickAction controls whether agent-deck posts a CLICKABLE iTerm2
+	// notification via the optional `terminal-notifier` CLI — one that, when
+	// clicked, runs `agent-deck focus <sessionID>` and fronts iTerm so the user
+	// jumps straight to that pane. When terminal-notifier is absent on PATH, or
+	// this is false, agent-deck falls back to the plain OSC 9 notification
+	// (EmitITermNotificationViaTty), which carries no click action.
+	//
+	// Default: true (nil = true) — clickable is preferred when available; the
+	// user opts out, not in.
+	ITermClickAction *bool `toml:"iterm_click_action"`
+}
+
+// GetITermClickAction returns whether the clickable terminal-notifier path is
+// enabled, defaulting to true when unset (nil). Note this is only the config
+// gate; the emit site additionally requires terminal-notifier on PATH and an
+// active iTerm2, falling back to OSC 9 otherwise.
+func (n NotificationsConfig) GetITermClickAction() bool {
+	if n.ITermClickAction == nil {
+		return true
+	}
+	return *n.ITermClickAction
 }
 
 // GetITermEnabled returns whether iTerm2 macOS notifications are enabled,

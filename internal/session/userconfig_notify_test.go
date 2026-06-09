@@ -89,3 +89,32 @@ func TestNotificationsConfig_ITermExplicitTrueRoundTrip(t *testing.T) {
 		t.Errorf("explicit-true flags must survive round-trip; got %+v", n)
 	}
 }
+
+// TestNotificationsConfig_ITermClickActionDefault pins that the new
+// iterm_click_action flag defaults to true when unset (nil pointer => true),
+// matching the other iTerm notification flags. Clickable notifications are the
+// preferred path when terminal-notifier is present; the user opts out, not in.
+func TestNotificationsConfig_ITermClickActionDefault(t *testing.T) {
+	var cfg NotificationsConfig // zero value: ITermClickAction nil
+
+	if !cfg.GetITermClickAction() {
+		t.Error("GetITermClickAction must default to true when unset")
+	}
+}
+
+// TestNotificationsConfig_ITermClickActionExplicitFalse verifies an explicit
+// iterm_click_action = false is honored (the opt-out path back to plain OSC 9).
+func TestNotificationsConfig_ITermClickActionExplicitFalse(t *testing.T) {
+	const data = `
+[notifications]
+iterm_click_action = false
+`
+	var cfg UserConfig
+	if _, err := toml.Decode(data, &cfg); err != nil {
+		t.Fatalf("toml.Decode failed: %v", err)
+	}
+
+	if cfg.Notifications.GetITermClickAction() {
+		t.Error("iterm_click_action=false must be honored (not defaulted to true)")
+	}
+}

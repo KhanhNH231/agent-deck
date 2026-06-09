@@ -258,6 +258,9 @@ func main() {
 		case "status":
 			handleStatus(profile, args[1:])
 			return
+		case "focus":
+			handleFocus(profile, args[1:])
+			return
 		case "profile":
 			handleProfile(args[1:])
 			return
@@ -2398,6 +2401,48 @@ func handleStatus(profile string, args []string) {
 	}
 }
 
+// handleFocus writes a focus-request handoff file for <sessionID> under the
+// agent-deck config dir and exits. It is the click action of a clickable iTerm2
+// notification: clicking runs `agent-deck focus <id>`, the running TUI polls
+// this file and jumps to that pane. Deliberately tiny — no storage load, no
+// tmux — so the click feels instant and works even if the session list is large.
+func handleFocus(profile string, args []string) {
+	fs := flag.NewFlagSet("focus", flag.ExitOnError)
+	fs.Usage = func() {
+		fmt.Println("Usage: agent-deck focus <sessionID>")
+		fmt.Println()
+		fmt.Println("Request the running agent-deck TUI to jump to and attach a session.")
+		fmt.Println("Typically invoked as the click action of a desktop notification.")
+		fmt.Println()
+		fmt.Println("Examples:")
+		fmt.Println("  agent-deck focus 1a2b3c4d-...")
+	}
+
+	if err := fs.Parse(normalizeArgs(fs, args)); err != nil {
+		os.Exit(1)
+	}
+
+	sessionID := fs.Arg(0)
+	if sessionID == "" {
+		fmt.Fprintln(os.Stderr, "Error: session ID is required")
+		fs.Usage()
+		os.Exit(1)
+	}
+
+	dir, err := session.GetAgentDeckDir()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: failed to resolve agent-deck dir: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := session.WriteFocusRequest(dir, sessionID, time.Now()); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: failed to write focus request: %v\n", err)
+		os.Exit(1)
+	}
+
+	os.Exit(0)
+}
+
 // handleProfile manages profiles (list, create, delete, default)
 func handleProfile(args []string) {
 	// Extract --json and -q/--quiet flags from anywhere in args
@@ -2956,6 +3001,7 @@ func printHelp() {
 	fmt.Println("  remove, rm       Remove a session")
 	fmt.Println("  rename, mv       Rename a session")
 	fmt.Println("  status           Show session status summary")
+	fmt.Println("  focus <id>       Request the running TUI to jump to a session (notification click action)")
 	fmt.Println("  session          Manage session lifecycle")
 	fmt.Println("  mcp              Manage MCP servers")
 	fmt.Println("  skill            Manage project skills")

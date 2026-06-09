@@ -364,6 +364,19 @@ type Home struct {
 	// doesn't produce false "needs input"/"finished"/"error" pings.
 	notifyTracker *notifyTracker
 
+	// focusRequestDir is the agent-deck config dir polled for the
+	// focus_request.json handoff written by `agent-deck focus <sessionID>`
+	// (a clickable iTerm2 notification's click action). Resolved once at Init.
+	// Empty disables the poller (e.g. dir resolution failed).
+	focusRequestDir string
+	// lastFocusRequestAt is the unix-nano timestamp of the most recently handled
+	// focus request, so the poller never acts on the same request twice.
+	lastFocusRequestAt int64
+	// agentDeckBinPath is the resolved path to this agent-deck binary (from
+	// os.Executable(), "agent-deck" fallback), embedded in the clickable
+	// notification's `<bin> focus <id>` action. Resolved once at Init.
+	agentDeckBinPath string
+
 	// Context for cleanup
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -2061,6 +2074,19 @@ func (h *Home) Init() tea.Cmd {
 		h.sysStatsCollector.Start()
 	}
 
+	// Resolve the focus-request handoff dir and this binary's path once, so the
+	// notify sweep (clickable emit) and the focus poller don't re-resolve them
+	// per tick. Failure to resolve the dir disables only the focus feature; the
+	// rest of the TUI is unaffected.
+	if h.focusRequestDir == "" {
+		if dir, err := session.GetAgentDeckDir(); err == nil {
+			h.focusRequestDir = dir
+		}
+	}
+	if h.agentDeckBinPath == "" {
+		h.agentDeckBinPath = resolveAgentDeckBinPath()
+	}
+
 	cmds := []tea.Cmd{
 		h.loadSessions,
 
@@ -2068,6 +2094,13 @@ func (h *Home) Init() tea.Cmd {
 		h.reviverTick(),
 		h.checkForUpdate(),
 		h.fetchRemoteSessions,
+	}
+
+	// Start the focus-request poller: clicking a clickable iTerm2 notification
+	// runs `agent-deck focus <id>`, which writes focus_request.json; this poll
+	// loop brings that session into view and attaches it.
+	if h.focusRequestDir != "" {
+		cmds = append(cmds, h.focusPoll(h.focusRequestDir))
 	}
 
 	// Start listening for storage changes
@@ -3347,8 +3380,10 @@ func (h *Home) backgroundStatusUpdate() {
 	// are off, avoiding the attached-ID query entirely.
 	var notifyCfg NotifyConfig
 	var attachedID string
+	var clickActionEnabled bool
 	if cfg, _ := session.LoadUserConfig(); cfg != nil {
 		notifyCfg = notifyConfigFrom(cfg.Notifications)
+		clickActionEnabled = cfg.Notifications.GetITermClickAction()
 	}
 	if notifyCfg.ITermEnabled {
 		attachedID = h.getAttachedSessionID()
@@ -3416,7 +3451,15 @@ func (h *Home) backgroundStatusUpdate() {
 			seen[inst.ID] = true
 			cur := inst.GetStatusThreadSafe()
 			if fire, event := h.notifyTracker.observe(inst.ID, cur, inst.ID == attachedID, notifyCfg, now, notifyStableDwell); fire {
-				tmux.EmitITermNotificationViaTty(notifyMessage(inst.Title, event), notifyCfg.ITermEnabled)
+				message := notifyMessage(inst.Title, event)
+				// Prefer the CLICKABLE path (terminal-notifier) so clicking the
+				// macOS notification runs `agent-deck focus <id>` and jumps to the
+				// pane. Falls back to OSC 9 when terminal-notifier is absent, the
+				// click-action config is off, or we're not in iTerm2 — the routed
+				// emitter reports handled=false in those cases.
+				if !tmux.EmitITermNotificationRouted("Agent Deck", message, inst.ID, h.agentDeckBinPath, clickActionEnabled) {
+					tmux.EmitITermNotificationViaTty(message, notifyCfg.ITermEnabled)
+				}
 			}
 		}
 		h.notifyTracker.prune(seen)
@@ -4733,6 +4776,51 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			_ = rev.ReviveAll(instances)
 		}(append([]*session.Instance(nil), h.instances...))
 		return h, h.reviverTick()
+
+	case focusPollTickMsg:
+		// Re-schedule the focus-request poll loop. No-op tick: nothing was a new
+		// request (or the file is absent). Only re-issue if the poller is active.
+		if h.focusRequestDir != "" {
+			return h, h.focusPoll(h.focusRequestDir)
+		}
+		return h, nil
+
+	case focusRequestMsg:
+		// A clickable iTerm2 notification was clicked: `agent-deck focus <id>`
+		// wrote focus_request.json. Mark it handled (so we never re-fire on the
+		// same request), clear the file, then jump to the pane.
+		h.lastFocusRequestAt = msg.requestedAt
+		if h.focusRequestDir != "" {
+			_ = session.ClearFocusRequest(h.focusRequestDir)
+		}
+
+		h.instancesMu.RLock()
+		inst := h.instanceByID[msg.sessionID]
+		h.instancesMu.RUnlock()
+
+		// Always keep the poll loop running.
+		pollCmd := h.focusPoll(h.focusRequestDir)
+
+		if inst == nil {
+			// Session gone (deleted while the notification sat in the tray):
+			// nothing to focus. Keep polling.
+			notifLog.Debug("focus_request_unknown_session", slog.String("session_id", msg.sessionID))
+			return h, pollCmd
+		}
+
+		// Bring the session into view: expand its group, move cursor, sync the
+		// viewport (reuses the established jump-to-session reveal path).
+		h.jumpToSession(inst)
+
+		// Attach only when the tmux session is live; a dead session has no pane
+		// to jump into, so we select-only (cursor is already on it) rather than
+		// risk a nil/no-op attach.
+		if inst.GetTmuxSession() != nil && inst.Exists() {
+			notifLog.Info("focus_request_attach", slog.String("session_id", inst.ID), slog.String("title", inst.Title))
+			return h, tea.Batch(pollCmd, h.attachSession(inst))
+		}
+		notifLog.Debug("focus_request_select_only_dead", slog.String("session_id", inst.ID), slog.String("title", inst.Title))
+		return h, pollCmd
 
 	case clearMaintenanceMsg:
 		h.maintenanceMsg = ""
