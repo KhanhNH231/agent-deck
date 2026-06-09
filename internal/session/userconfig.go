@@ -676,6 +676,69 @@ type NotificationsConfig struct {
 	// Default: true (nil = true). Set to false to suppress dispatch globally.
 	// Per-session override: Instance.NoTransitionNotify
 	TransitionEvents *bool `toml:"transition_events"`
+
+	// ITermEnabled controls whether agent-deck emits an iTerm2 OSC 9 macOS
+	// notification when a BACKGROUND session transitions (needs-input,
+	// finished, errored). No-op outside iTerm2. Distinct from the in-TUI
+	// notification bar (Enabled above) — this drives the host terminal's
+	// macOS Notification Center.
+	//
+	// AGENTDECK_ITERM_NOTIFY env var overrides this in either direction
+	// (=1/true/yes/on force on, =0/false/no/off force off; unset defers to
+	// this config), mirroring AGENTDECK_ITERM_BADGE.
+	//
+	// Default: true (nil = true). Opt-out by setting iterm_enabled = false.
+	ITermEnabled *bool `toml:"iterm_enabled"`
+
+	// OnNeedsInput gates the needs-input notification (a background session
+	// became Waiting). Default: true (nil = true).
+	OnNeedsInput *bool `toml:"on_needs_input"`
+
+	// OnFinished gates the finished/idle notification (a background session
+	// went Running → Idle). Default: true (nil = true).
+	OnFinished *bool `toml:"on_finished"`
+
+	// OnError gates the errored notification (a background session entered
+	// Error). Default: true (nil = true).
+	OnError *bool `toml:"on_error"`
+}
+
+// GetITermEnabled returns whether iTerm2 macOS notifications are enabled,
+// defaulting to true when unset (nil). The AGENTDECK_ITERM_NOTIFY env override
+// is applied separately, at the emit site (tmux.iTermNotifyEffective), exactly
+// as the badge does — config is the on-disk default, env is the per-run knob.
+func (n NotificationsConfig) GetITermEnabled() bool {
+	if n.ITermEnabled == nil {
+		return true
+	}
+	return *n.ITermEnabled
+}
+
+// GetOnNeedsInput returns whether the needs-input event fires, defaulting to
+// true when unset (nil).
+func (n NotificationsConfig) GetOnNeedsInput() bool {
+	if n.OnNeedsInput == nil {
+		return true
+	}
+	return *n.OnNeedsInput
+}
+
+// GetOnFinished returns whether the finished event fires, defaulting to true
+// when unset (nil).
+func (n NotificationsConfig) GetOnFinished() bool {
+	if n.OnFinished == nil {
+		return true
+	}
+	return *n.OnFinished
+}
+
+// GetOnError returns whether the error event fires, defaulting to true when
+// unset (nil).
+func (n NotificationsConfig) GetOnError() bool {
+	if n.OnError == nil {
+		return true
+	}
+	return *n.OnError
 }
 
 // GetTransitionEventsEnabled returns whether transition event dispatch is enabled.

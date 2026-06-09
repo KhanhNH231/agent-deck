@@ -551,6 +551,15 @@ func (t *GroupTree) ToggleGroup(path string) {
 	}
 }
 
+// IsExpanded reports whether the group at path is currently expanded. Unknown
+// groups report false.
+func (t *GroupTree) IsExpanded(path string) bool {
+	if group, exists := t.Groups[path]; exists {
+		return group.Expanded
+	}
+	return false
+}
+
 // ExpandGroup expands a group
 func (t *GroupTree) ExpandGroup(path string) {
 	if group, exists := t.Groups[path]; exists {

@@ -154,9 +154,11 @@ func TestIssue1190_RealModelSuggestionEnterStillAdvances(t *testing.T) {
 	h.newDialog.updateFocus()
 
 	enter(h) // open dropdown
-	down(h)  // move to first real suggestion (cursor 1)
-	if h.newDialog.modelSuggestionCursor != 1 {
-		t.Fatalf("down should move to first real model suggestion (cursor 1), got %d", h.newDialog.modelSuggestionCursor)
+	// cursor 0 = Type custom, 1 = Default (no-override), 2 = first real model.
+	down(h)
+	down(h)
+	if h.newDialog.modelSuggestionCursor != 2 {
+		t.Fatalf("two downs should move to first real model suggestion (cursor 2), got %d", h.newDialog.modelSuggestionCursor)
 	}
 	enter(h) // accept real suggestion
 	if got := h.newDialog.GetLaunchModelID(); got == "" {

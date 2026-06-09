@@ -97,6 +97,7 @@ func newSeamATestHome() *Home {
 		forkDialog:           NewForkDialog(),
 		confirmDialog:        NewConfirmDialog(),
 		helpOverlay:          NewHelpOverlay(),
+		recentSwitcher:       NewRecentSwitcher(),
 		mcpDialog:            NewMCPDialog(),
 		editPathsDialog:      NewEditPathsDialog(),
 		skillDialog:          NewSkillDialog(),

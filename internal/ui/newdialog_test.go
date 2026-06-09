@@ -105,8 +105,10 @@ func TestNewDialog_ModelSuggestions_FilterAndSelectCodex(t *testing.T) {
 	d.modelInput.SetValue("5.5")
 	d.filterModelSuggestions()
 
-	if len(d.modelSuggestions) == 0 || d.modelSuggestions[0] != "gpt-5.5" {
-		t.Fatalf("filtered model suggestions = %v, want gpt-5.5 first", d.modelSuggestions)
+	// The "Default" (no-override) sentinel sits first and is exempt from the
+	// catalog substring filter; the matching catalog ids follow it.
+	if len(d.modelSuggestions) < 2 || d.modelSuggestions[0] != defaultModelSentinel || d.modelSuggestions[1] != "gpt-5.5" {
+		t.Fatalf("filtered model suggestions = %v, want [Default gpt-5.5 ...]", d.modelSuggestions)
 	}
 	d, _ = d.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if !d.IsModelSuggestionsActive() {
@@ -115,12 +117,14 @@ func TestNewDialog_ModelSuggestions_FilterAndSelectCodex(t *testing.T) {
 	if view := d.View(); !strings.Contains(view, "Type custom model ID") || !strings.Contains(view, "gpt-5.5") {
 		t.Fatalf("model dropdown should show custom entry and known model IDs after enter: %q", view)
 	}
+	// cursor 0 = Type custom, 1 = Default, 2 = first catalog match (gpt-5.5).
+	d, _ = d.Update(tea.KeyMsg{Type: tea.KeyDown})
 	d, _ = d.Update(tea.KeyMsg{Type: tea.KeyDown})
 	if !d.IsModelSuggestionsActive() {
 		t.Fatal("down inside model dropdown should keep suggestions active")
 	}
-	if d.modelSuggestionCursor != 1 {
-		t.Fatalf("modelSuggestionCursor = %d, want 1", d.modelSuggestionCursor)
+	if d.modelSuggestionCursor != 2 {
+		t.Fatalf("modelSuggestionCursor = %d, want 2 (first catalog model after Default)", d.modelSuggestionCursor)
 	}
 	d, _ = d.Update(tea.KeyMsg{Type: tea.KeyEnter})
 

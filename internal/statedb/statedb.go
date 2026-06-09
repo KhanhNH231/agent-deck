@@ -103,7 +103,12 @@ func withBusyRetry(op func() error) error {
 
 // SchemaVersion tracks the current database schema version.
 // Bump this when adding migrations.
-const SchemaVersion = 9
+//
+// v10 (restore-last-opened-sessions): per-session `was_open` boolean. Records
+// whether a session was explicitly open (attached / started) the last time the
+// app ran, so a project re-expand can offer to restore sessions that were open
+// but are no longer alive. DEFAULT 0 makes legacy rows load as not-open.
+const SchemaVersion = 10
 
 // StateDB wraps a SQLite database for session/group persistence.
 // Thread-safe for concurrent use from multiple goroutines within one process.
@@ -149,7 +154,14 @@ type InstanceRow struct {
 	// after upgrade.
 	TmuxSocketName string
 	// TitleLocked blocks Claude session-name sync into Title (v1.7.52+, issue #697).
-	TitleLocked    bool
+	TitleLocked bool
+	// WasOpen records whether this session was explicitly open (attached or
+	// started/restarted) the last time the app ran (v10, restore-last-opened-
+	// sessions). It is set/cleared EXPLICITLY at attach/start vs. close/delete
+	// sites — NOT derived from live status at save time — so a session running
+	// at quit keeps WasOpen=true and becomes a restore candidate if its tmux
+	// died during downtime. DEFAULT 0 makes legacy rows load as not-open.
+	WasOpen        bool
 	WorktreePath   string
 	WorktreeRepo   string
 	WorktreeBranch string
@@ -339,6 +351,7 @@ func (s *StateDB) Migrate() error {
 			is_conductor            INTEGER NOT NULL DEFAULT 0,
 			no_transition_notify    INTEGER NOT NULL DEFAULT 0,
 			title_locked            INTEGER NOT NULL DEFAULT 0,
+			was_open                INTEGER NOT NULL DEFAULT 0,
 			worktree_path     TEXT NOT NULL DEFAULT '',
 			worktree_repo     TEXT NOT NULL DEFAULT '',
 			worktree_branch   TEXT NOT NULL DEFAULT '',
@@ -495,6 +508,10 @@ func (s *StateDB) Migrate() error {
 		// the pre-v1.9.22 behavior for legacy rows (fall through to
 		// conductor/group/env/profile/global/default).
 		"ALTER TABLE instances ADD COLUMN account TEXT NOT NULL DEFAULT ''",
+		// v10 (restore-last-opened-sessions): per-session open flag. Default 0
+		// makes pre-v10 rows load as not-open (safe — restore only ADDS dead
+		// sessions back, never empties the table).
+		"ALTER TABLE instances ADD COLUMN was_open INTEGER NOT NULL DEFAULT 0",
 	}
 	for _, stmt := range alterMigrations {
 		if _, err := tx.Exec(stmt); err != nil {
@@ -555,6 +572,13 @@ func (s *StateDB) Migrate() error {
 				}
 			}
 		}
+		if oldVer < 10 {
+			if _, err := tx.Exec(`ALTER TABLE instances ADD COLUMN was_open INTEGER NOT NULL DEFAULT 0`); err != nil {
+				if !strings.Contains(err.Error(), "duplicate column") {
+					return fmt.Errorf("statedb: migrate v10 was_open: %w", err)
+				}
+			}
+		}
 		if _, err := tx.Exec(`
 			UPDATE metadata SET value = ? WHERE key = 'schema_version'
 		`, schemaVersion); err != nil {
@@ -604,6 +628,10 @@ func (s *StateDB) SaveInstance(inst *InstanceRow) error {
 	if inst.TitleLocked {
 		titleLockedInt = 1
 	}
+	wasOpenInt := 0
+	if inst.WasOpen {
+		wasOpenInt = 1
+	}
 	_, err := s.db.Exec(`
 		INSERT OR REPLACE INTO instances (
 			id, title, project_path, group_path, sort_order,
@@ -611,15 +639,15 @@ func (s *StateDB) SaveInstance(inst *InstanceRow) error {
 			created_at, last_accessed,
 			parent_session_id, is_conductor, no_transition_notify,
 			worktree_path, worktree_repo, worktree_branch, account,
-			tool_data, title_locked
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			tool_data, title_locked, was_open
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		inst.ID, inst.Title, inst.ProjectPath, inst.GroupPath, inst.Order,
 		inst.Command, inst.Wrapper, inst.Tool, inst.Status, inst.TmuxSession, inst.TmuxSocketName,
 		inst.CreatedAt.Unix(), inst.LastAccessed.Unix(),
 		inst.ParentSessionID, isConductorInt, noTransitionNotifyInt,
 		inst.WorktreePath, inst.WorktreeRepo, inst.WorktreeBranch, inst.Account,
-		string(toolData), titleLockedInt,
+		string(toolData), titleLockedInt, wasOpenInt,
 	)
 	return err
 }
@@ -753,8 +781,8 @@ func (s *StateDB) saveInstancesOnce(insts []*InstanceRow) error {
 			created_at, last_accessed,
 			parent_session_id, is_conductor, no_transition_notify,
 			worktree_path, worktree_repo, worktree_branch, account,
-			tool_data, title_locked
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			tool_data, title_locked, was_open
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		return err
@@ -781,13 +809,17 @@ func (s *StateDB) saveInstancesOnce(insts []*InstanceRow) error {
 		if inst.TitleLocked {
 			titleLockedInt = 1
 		}
+		wasOpenInt := 0
+		if inst.WasOpen {
+			wasOpenInt = 1
+		}
 		if _, err := stmt.Exec(
 			inst.ID, inst.Title, inst.ProjectPath, inst.GroupPath, inst.Order,
 			inst.Command, inst.Wrapper, inst.Tool, inst.Status, inst.TmuxSession, inst.TmuxSocketName,
 			inst.CreatedAt.Unix(), inst.LastAccessed.Unix(),
 			inst.ParentSessionID, isConductorInt, noTransitionNotifyInt,
 			inst.WorktreePath, inst.WorktreeRepo, inst.WorktreeBranch, inst.Account,
-			string(toolData), titleLockedInt,
+			string(toolData), titleLockedInt, wasOpenInt,
 		); err != nil {
 			return err
 		}
@@ -816,7 +848,7 @@ func (s *StateDB) LoadInstances() ([]*InstanceRow, error) {
 			created_at, last_accessed,
 			parent_session_id, is_conductor, no_transition_notify,
 			worktree_path, worktree_repo, worktree_branch, account,
-			tool_data, title_locked
+			tool_data, title_locked, was_open
 		FROM instances ORDER BY sort_order
 	`)
 	if err != nil {
@@ -829,14 +861,14 @@ func (s *StateDB) LoadInstances() ([]*InstanceRow, error) {
 		r := &InstanceRow{}
 		var createdUnix, accessedUnix int64
 		var toolDataStr string
-		var isConductorInt, noTransitionNotifyInt, titleLockedInt int
+		var isConductorInt, noTransitionNotifyInt, titleLockedInt, wasOpenInt int
 		if err := rows.Scan(
 			&r.ID, &r.Title, &r.ProjectPath, &r.GroupPath, &r.Order,
 			&r.Command, &r.Wrapper, &r.Tool, &r.Status, &r.TmuxSession, &r.TmuxSocketName,
 			&createdUnix, &accessedUnix,
 			&r.ParentSessionID, &isConductorInt, &noTransitionNotifyInt,
 			&r.WorktreePath, &r.WorktreeRepo, &r.WorktreeBranch, &r.Account,
-			&toolDataStr, &titleLockedInt,
+			&toolDataStr, &titleLockedInt, &wasOpenInt,
 		); err != nil {
 			return nil, err
 		}
@@ -847,6 +879,7 @@ func (s *StateDB) LoadInstances() ([]*InstanceRow, error) {
 		r.IsConductor = isConductorInt != 0
 		r.NoTransitionNotify = noTransitionNotifyInt != 0
 		r.TitleLocked = titleLockedInt != 0
+		r.WasOpen = wasOpenInt != 0
 		r.ToolData = json.RawMessage(toolDataStr)
 		result = append(result, r)
 	}

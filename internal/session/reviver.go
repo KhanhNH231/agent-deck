@@ -85,7 +85,12 @@ func (r *Reviver) Classify(inst *Instance) RevivalClass {
 	if !r.TmuxExists(name, inst.TmuxSocketName) {
 		return ClassDead
 	}
-	if inst.Status == StatusError || !r.PipeAlive(name) {
+	// Read Status via the lock, not the raw field: Classify runs on the UI
+	// goroutine (restore-candidate count) and in the restore tea.Cmd, both
+	// concurrent with backgroundStatusUpdate writing Status under i.mu. A raw
+	// read races (string-header tear). No caller holds i.mu here, so the
+	// RLock can't re-enter/deadlock.
+	if inst.GetStatusThreadSafe() == StatusError || !r.PipeAlive(name) {
 		return ClassErrored
 	}
 	return ClassAlive

@@ -42,6 +42,7 @@ const (
 	hotkeyReload          = "reload"
 	hotkeyDetach          = "detach"
 	hotkeyWatcherPanel    = "watcher_panel"
+	hotkeyRecentSwitcher  = "recent_switcher"
 )
 
 var hotkeyActionOrder = []string{
@@ -79,6 +80,7 @@ var hotkeyActionOrder = []string{
 	hotkeyReload,
 	hotkeyDetach,
 	hotkeyWatcherPanel,
+	hotkeyRecentSwitcher,
 }
 
 var defaultHotkeyBindings = map[string]string{
@@ -116,6 +118,7 @@ var defaultHotkeyBindings = map[string]string{
 	hotkeyReload:          "ctrl+r",
 	hotkeyDetach:          "ctrl+q",
 	hotkeyWatcherPanel:    "w",
+	hotkeyRecentSwitcher:  "ctrl+o",
 }
 
 var hotkeyActionDefaultTriggers = map[string][]string{

@@ -75,11 +75,14 @@ func (d *GeminiModelDialog) SetSize(width, height int) {
 func (d *GeminiModelDialog) HandleModelsFetched(msg modelsFetchedMsg) {
 	d.loading = false
 	d.err = msg.err
-	d.models = msg.models
+	// Surface the explicit "Default" (no-override) entry first; selecting it
+	// emits an empty model so gemini uses its own configured default.
+	d.models = append([]string{defaultModelSentinel}, msg.models...)
 
-	// Position cursor on current model
+	// Position cursor on the current model; if none is set, the "Default" entry
+	// at index 0 is already highlighted (no-override state).
 	for i, m := range d.models {
-		if m == d.current {
+		if m == d.current && d.current != "" {
 			d.cursor = i
 			break
 		}
@@ -110,7 +113,11 @@ func (d *GeminiModelDialog) Update(msg tea.KeyMsg) (*GeminiModelDialog, tea.Cmd)
 
 	case "enter":
 		if len(d.models) > 0 && d.cursor >= 0 && d.cursor < len(d.models) {
+			// The "Default" sentinel resolves to "" — no model override.
 			selected := d.models[d.cursor]
+			if selected == defaultModelSentinel {
+				selected = ""
+			}
 			instanceID := d.instanceID
 			d.Hide()
 			return d, func() tea.Msg {

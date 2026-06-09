@@ -23,6 +23,7 @@ const (
 	ConfirmCloseRemoteSession
 	ConfirmRemoveSession     // status-gated registry-only remove (TUI 'X')
 	ConfirmBulkRemoveErrored // bulk remove of all errored sessions (TUI Ctrl+X)
+	ConfirmRestoreSessions   // restore previously-open sessions on project re-expand
 )
 
 // ConfirmDialog handles confirmation for destructive actions
@@ -132,6 +133,21 @@ func (c *ConfirmDialog) ShowBulkRemoveErrored(count int) {
 	c.mcpCount = count // reuse mcpCount as a generic integer carrier
 	c.buttonCount = 2
 	c.focusedButton = 1
+}
+
+// ShowRestoreSessions shows the prompt offered when a top-level project group
+// is re-expanded and has sessions that were open last time but are no longer
+// alive. groupPath is stored as targetID; count is carried in mcpCount (the
+// generic integer carrier, same as ShowBulkRemoveErrored). Default focus is the
+// safe DECLINE button (index 1) so a stray Enter does not restore.
+func (c *ConfirmDialog) ShowRestoreSessions(groupPath string, count int) {
+	c.visible = true
+	c.confirmType = ConfirmRestoreSessions
+	c.targetID = groupPath
+	c.targetName = groupPath
+	c.mcpCount = count // reuse mcpCount as a generic integer carrier
+	c.buttonCount = 2
+	c.focusedButton = 1 // default to "Not now" (safe choice)
 }
 
 // ShowDeleteGroup shows confirmation for group deletion
@@ -367,6 +383,17 @@ func (c *ConfirmDialog) View() string {
 			renderButton("Cancel", ColorAccent, c.focusedButton == 1))
 		buttons = lipgloss.JoinVertical(lipgloss.Left, buttonRow,
 			hintStyle.Render("y remove · n cancel · ←/→ navigate · Enter select · Esc"))
+
+	case ConfirmRestoreSessions:
+		title = fmt.Sprintf("Restore %d previous sessions?", c.mcpCount)
+		warning = fmt.Sprintf("These sessions in \"%s\" were open last time\nbut are no longer running.", c.targetName)
+		details = "• Dead sessions are restarted (resume)\n• Errored sessions reconnect their control pipe\n• Nothing is auto-attached — Enter the ones you want"
+		borderColor = ColorAccent
+		buttonRow := lipgloss.JoinHorizontal(lipgloss.Center,
+			renderButton("Restore", ColorGreen, c.focusedButton == 0), "  ",
+			renderButton("Not now", ColorAccent, c.focusedButton == 1))
+		buttons = lipgloss.JoinVertical(lipgloss.Left, buttonRow,
+			hintStyle.Render("y restore · n not now · ←/→ navigate · Enter select · Esc"))
 
 	case ConfirmDeleteGroup:
 		title = "⚠  Delete Group?"

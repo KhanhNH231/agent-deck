@@ -93,6 +93,15 @@ type Instance struct {
 	// `--title-lock` on add/launch or `session set-title-lock`.
 	TitleLocked bool `json:"title_locked,omitempty"`
 
+	// WasOpen records whether this session was explicitly open (attached or
+	// started/restarted) the last time the app ran. Set true at the attach /
+	// start / restart sites; set false on explicit user close and on
+	// delete/remove. NOT touched on app quit, so a session running at quit
+	// keeps WasOpen=true and becomes a restore candidate if its tmux died
+	// during downtime. Drives the "Restore N previous sessions?" prompt when a
+	// top-level project group is re-expanded (restore-last-opened-sessions).
+	WasOpen bool `json:"was_open,omitempty"`
+
 	// Git worktree support
 	WorktreePath     string `json:"worktree_path,omitempty"`      // Path to worktree (if session is in worktree)
 	WorktreeRepoRoot string `json:"worktree_repo_root,omitempty"` // Original repo root
@@ -5928,11 +5937,17 @@ func SupportsLaunchModel(tool string) bool {
 
 // ApplyLaunchModel stores a per-session model override in the tool-specific
 // field that the relevant command builder already reads on start/restart.
+//
+// An empty model means "Default" — no per-session override — and must actively
+// CLEAR any value previously stored so the next launch emits no --model flag and
+// the agent CLI falls back to its own configured default. It is intentionally
+// distinct from the [claude].default_model preselect (#1172), which force-picks
+// a catalog id; "Default" is the explicit no-override choice.
 func (i *Instance) ApplyLaunchModel(model string) error {
-	model = strings.TrimSpace(model)
-	if i == nil || model == "" {
+	if i == nil {
 		return nil
 	}
+	model = strings.TrimSpace(model)
 
 	switch {
 	case IsClaudeCompatible(i.Tool):

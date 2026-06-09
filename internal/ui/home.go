@@ -207,6 +207,7 @@ type Home struct {
 	forkDialog           *ForkDialog           // For forking sessions
 	confirmDialog        *ConfirmDialog        // For confirming destructive actions
 	helpOverlay          *HelpOverlay          // For showing keyboard shortcuts
+	recentSwitcher       *RecentSwitcher       // Quick-switch overlay: recency-ordered sessions across all projects
 	mcpDialog            *MCPDialog            // For managing MCPs
 	pluginDialog         *PluginDialog         // For managing per-session Claude Code plugins (RFC PLUGIN_ATTACH.md)
 	editPathsDialog      *EditPathsDialog      // For editing multi-repo paths
@@ -351,6 +352,14 @@ type Home struct {
 	forkingSessions    map[string]time.Time        // sessionID -> fork start time (fork in progress)
 	creatingSessions   map[string]*CreatingSession // tempID -> placeholder for worktree creation in progress
 	animationFrame     int                         // Current frame for spinner animation
+
+	// restorePrompted dedups the "Restore N previous sessions?" prompt per
+	// top-level group within this app session (groupPath -> already prompted).
+	// In-memory only — no persistent decline memory (restore-last-opened-sessions).
+	restorePrompted map[string]bool
+	// restoreReviver classifies restore candidates' live state. nil in
+	// production → lazily set to session.NewReviver(); tests inject a stub.
+	restoreReviver *session.Reviver
 
 	// Context for cleanup
 	ctx    context.Context
@@ -918,6 +927,7 @@ func NewHomeWithProfileAndMode(profile string) *Home {
 		forkDialog:           NewForkDialog(),
 		confirmDialog:        NewConfirmDialog(),
 		helpOverlay:          NewHelpOverlay(),
+		recentSwitcher:       NewRecentSwitcher(),
 		mcpDialog:            NewMCPDialog(),
 		pluginDialog:         NewPluginDialog(),
 		editPathsDialog:      NewEditPathsDialog(),
@@ -954,6 +964,7 @@ func NewHomeWithProfileAndMode(profile string) *Home {
 		mcpLoadingSessions:   make(map[string]time.Time),
 		forkingSessions:      make(map[string]time.Time),
 		creatingSessions:     make(map[string]*CreatingSession),
+		restorePrompted:      make(map[string]bool),
 		lastLogActivity:      make(map[string]time.Time),
 		windowsCollapsed:     make(map[string]bool),
 		worktreeDirtyCache:   make(map[string]bool),
@@ -3324,6 +3335,21 @@ func (h *Home) backgroundStatusUpdate() {
 
 	tracker := h.getTransitionTracker()
 
+	// iTerm2 background-pane notifications (OSC 9). Resolve the config and the
+	// currently-attached session once per tick, before the worker pool fans
+	// out: notifyCfg is a cheap mtime-cached read and getAttachedSessionID()
+	// runs one tmux query, so doing this per-transition would be wasteful.
+	// notifyEnabled short-circuits the whole feature when iTerm notifications
+	// are off, avoiding the attached-ID query entirely.
+	var notifyCfg NotifyConfig
+	var attachedID string
+	if cfg, _ := session.LoadUserConfig(); cfg != nil {
+		notifyCfg = notifyConfigFrom(cfg.Notifications)
+	}
+	if notifyCfg.ITermEnabled {
+		attachedID = h.getAttachedSessionID()
+	}
+
 	g := new(errgroup.Group)
 	g.SetLimit(10) // Pool of 10 workers (tmux server serializes, more doesn't help)
 
@@ -3366,6 +3392,15 @@ func (h *Home) backgroundStatusUpdate() {
 				// has oscillated >3 times within 60s. One alert per burst.
 				session.GlobalFlickerDetector().Observe(inst.ID, string(newStatus))
 				tracker.record(inst.ID, inst.Title, inst.Tool, string(oldStatus), string(newStatus))
+
+				// iTerm2 OSC 9: notify on a qualifying transition for a
+				// BACKGROUND pane (not the one the user is attached to).
+				// Emits via /dev/tty + tmux DCS passthrough so the TUI frame
+				// on os.Stdout is untouched; tmux applies the iTerm2-active
+				// gate + AGENTDECK_ITERM_NOTIFY override.
+				if notifyCfg.ITermEnabled {
+					maybeNotifyTransition(oldStatus, newStatus, inst.Title, inst.ID == attachedID, notifyCfg)
+				}
 			}
 			return nil
 		})
@@ -4191,6 +4226,9 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// CRITICAL: Save the new session to JSON immediately to prevent orphaning
 			// Skip in-memory state update (reload will handle that), but persist to disk
 			uiLog.Debug("reload_save_session_created", slog.String("id", msg.instance.ID), slog.String("title", msg.instance.Title))
+			// A newly-created session starts running → it is open
+			// (restore-last-opened-sessions).
+			msg.instance.WasOpen = true
 			h.instancesMu.Lock()
 			h.instances = append(h.instances, msg.instance)
 			h.instancesMu.Unlock()
@@ -4208,6 +4246,9 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 				h.rebuildFlatItems() // Remove placeholder from list
 			}
 		} else {
+			// A newly-created session starts running → it is open
+			// (restore-last-opened-sessions).
+			msg.instance.WasOpen = true
 			h.instancesMu.Lock()
 			h.instances = append(h.instances, msg.instance)
 			h.instanceByID[msg.instance.ID] = msg.instance
@@ -4397,6 +4438,13 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return h, nil
 		}
 
+		// Explicit close: clear WasOpen so this session is not offered for
+		// restore on the next project re-expand (restore-last-opened-sessions).
+		// closeSession already clears it on the original pointer; reassert on
+		// the current instance in case a reload swapped the pointer.
+		if inst := h.getInstanceByID(msg.sessionID); inst != nil {
+			inst.WasOpen = false
+		}
 		h.cachedStatusCounts.valid.Store(false)
 		h.invalidatePreviewCache(msg.sessionID)
 		h.rebuildFlatItems()
@@ -4508,6 +4556,10 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if inst := h.getInstanceByID(msg.sessionID); inst != nil {
 				// Refresh the loaded MCPs to match the new config
 				inst.CaptureLoadedMCPs()
+				// A successful (re)start re-opens the session, so it is a
+				// restore candidate again if its tmux later dies during
+				// downtime (restore-last-opened-sessions).
+				inst.WasOpen = true
 			}
 			// Run dedup in-memory before saving, mirroring sessionCreatedMsg pattern (line ~2864)
 			h.instancesMu.Lock()
@@ -4522,6 +4574,19 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Clear animation so ENTER can attach immediately.
 		delete(h.resumingSessions, msg.sessionID)
+		return h, nil
+
+	case projectSessionsRestoredMsg:
+		// The restore ladder mutated WasOpen + (re)started/revived background
+		// state. Persist via forceSaveInstances (matches the undo-restore path):
+		// non-force saves abort on external mtime change. Then refresh the view.
+		h.cachedStatusCounts.valid.Store(false)
+		h.rebuildFlatItems()
+		h.forceSaveInstances()
+		total := msg.restarted + msg.revived
+		if total > 0 {
+			h.setError(fmt.Errorf("restored %d session(s) in '%s'", total, msg.groupPath))
+		}
 		return h, nil
 
 	case mcpRestartedMsg:
@@ -5430,6 +5495,9 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			h.helpOverlay, _ = h.helpOverlay.Update(msg)
 			return h, nil
 		}
+		if h.recentSwitcher.IsVisible() {
+			return h.handleRecentSwitcherKey(msg)
+		}
 		if h.search.IsVisible() {
 			return h.handleSearchKey(msg)
 		}
@@ -5540,6 +5608,38 @@ func (h *Home) handleSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		h.globalSearch.Show()
 	}
 
+	return h, cmd
+}
+
+// handleRecentSwitcherKey handles keys for the quick-switch overlay. On Enter it
+// attaches the highlighted session via the existing attachSession path (so
+// MarkAccessed + tmux attach behave identically to a normal Enter), even when
+// the session lives in a different project/group than the current cursor. The
+// cursor and group expansion are synced to the selected session first so the
+// main view lands on it after detach. Esc closes with no change.
+func (h *Home) handleRecentSwitcherKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if msg.String() == "enter" {
+		selected := h.recentSwitcher.Selected()
+		h.recentSwitcher.Hide()
+		if selected == nil {
+			return h, nil
+		}
+		if selected.GroupPath != "" {
+			h.groupTree.ExpandGroupWithParents(selected.GroupPath)
+		}
+		h.rebuildFlatItems()
+		for i, item := range h.flatItems {
+			if item.Type == session.ItemTypeSession && item.Session != nil && item.Session.ID == selected.ID {
+				h.cursor = i
+				h.syncViewport()
+				break
+			}
+		}
+		return h, h.attachSession(selected)
+	}
+
+	var cmd tea.Cmd
+	h.recentSwitcher, cmd = h.recentSwitcher.Update(msg)
 	return h, cmd
 }
 
@@ -6052,7 +6152,7 @@ func (h *Home) hasModalVisible() bool {
 	return h.initialLoading || h.isQuitting || h.notesEditing || h.jumpMode ||
 		h.setupWizard.IsVisible() || h.settingsPanel.IsVisible() ||
 		h.watcherPanel.IsVisible() || // hotkeyWatcherPanel overlay
-		h.helpOverlay.IsVisible() || h.search.IsVisible() || h.globalSearch.IsVisible() ||
+		h.helpOverlay.IsVisible() || h.recentSwitcher.IsVisible() || h.search.IsVisible() || h.globalSearch.IsVisible() ||
 		h.newDialog.IsVisible() || h.groupDialog.IsVisible() || h.forkDialog.IsVisible() ||
 		h.confirmDialog.IsVisible() || h.mcpDialog.IsVisible() || h.pluginDialog.IsVisible() || h.skillDialog.IsVisible() ||
 		h.geminiModelDialog.IsVisible() || h.sessionPickerDialog.IsVisible() ||
@@ -6143,6 +6243,11 @@ func (h *Home) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 					}
 				}
 				h.saveGroupState()
+				// Offer to restore previously-open sessions on a top-level
+				// project re-expand (restore-last-opened-sessions).
+				if h.groupTree.IsExpanded(groupPath) {
+					h.maybePromptRestore(groupPath)
+				}
 			}
 			return h, nil
 		}
@@ -6496,6 +6601,11 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					}
 				}
 				h.saveGroupState()
+				// Offer to restore previously-open sessions on a top-level
+				// project re-expand (restore-last-opened-sessions).
+				if h.groupTree.IsExpanded(groupPath) {
+					h.maybePromptRestore(groupPath)
+				}
 			} else if item.Type == session.ItemTypeWindow {
 				// Find parent session by WindowSessionID
 				var parentInst *session.Instance
@@ -6552,6 +6662,11 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					}
 				}
 				h.saveGroupState()
+				// Offer to restore previously-open sessions on a top-level
+				// project re-expand (restore-last-opened-sessions).
+				if h.groupTree.IsExpanded(groupPath) {
+					h.maybePromptRestore(groupPath)
+				}
 			} else if item.Type == session.ItemTypeSession && h.sessionHasWindows(item) {
 				sid := item.Session.ID
 				h.windowsCollapsed[sid] = !h.windowsCollapsed[sid]
@@ -6921,6 +7036,16 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "?":
 		h.helpOverlay.SetSize(h.width, h.height)
 		h.helpOverlay.Show()
+		return h, nil
+
+	case "ctrl+o":
+		// Quick-switch overlay: recency-ordered sessions across all projects.
+		h.instancesMu.RLock()
+		instances := make([]*session.Instance, len(h.instances))
+		copy(instances, h.instances)
+		h.instancesMu.RUnlock()
+		h.recentSwitcher.SetSize(h.width, h.height)
+		h.recentSwitcher.Show(instances)
 		return h, nil
 
 	case "<":
@@ -7654,6 +7779,10 @@ func (h *Home) confirmAction() tea.Cmd {
 	case ConfirmBulkRemoveErrored:
 		h.confirmDialog.Hide()
 		return h.bulkRemoveErrored()
+	case ConfirmRestoreSessions:
+		groupPath := h.confirmDialog.GetTargetID()
+		h.confirmDialog.Hide()
+		return h.restoreProjectSessions(groupPath)
 	}
 	h.confirmDialog.Hide()
 	return nil
@@ -9542,9 +9671,23 @@ type sessionRestoredMsg struct {
 	warning  string
 }
 
+// projectSessionsRestoredMsg signals that the "Restore N previous sessions?"
+// ladder finished re-establishing background tmux/pipe state for a project's
+// previously-open sessions (restore-last-opened-sessions). Distinct from
+// sessionRestoredMsg (undo-delete) on purpose — this feature only re-attaches
+// background state and never re-adds a deleted row.
+type projectSessionsRestoredMsg struct {
+	groupPath string
+	restarted int // dead sessions resumed via Restart()
+	revived   int // errored sessions whose pipe was reconnected
+}
+
 // deleteSession deletes a session
 func (h *Home) deleteSession(inst *session.Instance) tea.Cmd {
 	id := inst.ID
+	// Delete clears the open flag so an undo-restored row never carries a stale
+	// WasOpen=true into a restore prompt (restore-last-opened-sessions).
+	inst.WasOpen = false
 	isWorktree := inst.IsWorktree()
 	worktreePath := inst.WorktreePath
 	worktreeRepoRoot := inst.WorktreeRepoRoot
@@ -9589,10 +9732,57 @@ func (h *Home) deleteSession(inst *session.Instance) tea.Cmd {
 // closeSession stops a session process but keeps metadata in list/storage.
 func (h *Home) closeSession(inst *session.Instance) tea.Cmd {
 	id := inst.ID
+	// Explicit user close: this session is no longer "open", so it must NOT be
+	// offered for restore on the next project re-expand
+	// (restore-last-opened-sessions).
+	inst.WasOpen = false
 	return func() tea.Msg {
 		killErr := inst.Kill()
 		return sessionClosedMsg{sessionID: id, killErr: killErr}
 	}
+}
+
+// reviverForRestore returns the Reviver used to classify restore candidates,
+// lazily constructing the production default when none was injected (tests
+// inject a stub via restoreReviver).
+func (h *Home) reviverForRestore() *session.Reviver {
+	if h.restoreReviver == nil {
+		h.restoreReviver = session.NewReviver()
+	}
+	return h.restoreReviver
+}
+
+// maybePromptRestore is called after a group flips collapsed→expanded. For a
+// TOP-LEVEL group (Level == 0) not already prompted this app session, it counts
+// restore candidates (WasOpen && not currently alive) among the group's direct
+// sessions and, if > 0, shows the "Restore N previous sessions?" prompt and
+// marks the group prompted. No-op for nested groups or zero candidates.
+func (h *Home) maybePromptRestore(groupPath string) {
+	if groupPath == "" || session.GetGroupLevel(groupPath) != 0 {
+		return
+	}
+	if h.restorePrompted == nil {
+		h.restorePrompted = map[string]bool{}
+	}
+	if h.restorePrompted[groupPath] {
+		return
+	}
+
+	h.instancesMu.RLock()
+	groupInsts := make([]*session.Instance, 0)
+	for _, inst := range h.instances {
+		if inst != nil && inst.GroupPath == groupPath {
+			groupInsts = append(groupInsts, inst)
+		}
+	}
+	h.instancesMu.RUnlock()
+
+	count := session.CountRestoreCandidates(groupInsts, h.reviverForRestore())
+	if count <= 0 {
+		return
+	}
+	h.restorePrompted[groupPath] = true
+	h.confirmDialog.ShowRestoreSessions(groupPath, count)
 }
 
 // removeSession removes a session from the registry without killing the
@@ -9601,6 +9791,8 @@ func (h *Home) closeSession(inst *session.Instance) tea.Cmd {
 // handler in Update persists the change.
 func (h *Home) removeSession(inst *session.Instance) tea.Cmd {
 	id := inst.ID
+	// Registry removal clears the open flag (restore-last-opened-sessions).
+	inst.WasOpen = false
 	return func() tea.Msg {
 		return sessionDeletedMsg{deletedID: id}
 	}
@@ -9814,6 +10006,82 @@ func (h *Home) restartRemoteSession(remoteName, sessionID, title string) tea.Cmd
 	}
 }
 
+// restoreProjectSessions runs the restore ladder for a top-level group's
+// previously-open-but-not-alive sessions (restore-last-opened-sessions). Each
+// candidate is classified by its CURRENT state and handled non-destructively:
+//
+//   - ClassAlive   → no-op (already healthy)
+//   - ClassErrored → Reviver.ReviveOne (reconnect the control pipe)
+//   - ClassDead    → restartSession with RESUME (inst.Restart())
+//   - row deleted  → skip (instanceByID lookup nil)
+//
+// The DEAD set is restarted SERIALLY via tea.Sequence (not a parallel
+// tea.Batch) to avoid agent cold-start rate limits; the spawn-lock guard in
+// Instance.Restart() additionally prevents any double-spawn. No session is
+// auto-attached — restore only re-establishes background tmux/pipe state, and
+// the user then Enters whichever session they want.
+func (h *Home) restoreProjectSessions(groupPath string) tea.Cmd {
+	rev := h.reviverForRestore()
+
+	// Snapshot candidate IDs under lock. Classify lazily inside each step at
+	// execution time so a session that changed state between prompt and accept
+	// is handled by its CURRENT class.
+	h.instancesMu.RLock()
+	ids := make([]string, 0)
+	for _, inst := range h.instances {
+		if session.IsRestoreCandidate(inst, rev) && inst.GroupPath == groupPath {
+			ids = append(ids, inst.ID)
+		}
+	}
+	h.instancesMu.RUnlock()
+
+	if len(ids) == 0 {
+		gp := groupPath
+		return func() tea.Msg { return projectSessionsRestoredMsg{groupPath: gp} }
+	}
+
+	// Shared counters mutated by the serial steps. tea.Sequence runs each cmd
+	// to completion before the next, so no concurrent access occurs.
+	counts := &struct{ restarted, revived int }{}
+
+	steps := make([]tea.Cmd, 0, len(ids)+1)
+	for _, id := range ids {
+		id := id
+		steps = append(steps, func() tea.Msg {
+			h.instancesMu.RLock()
+			current := h.instanceByID[id]
+			h.instancesMu.RUnlock()
+			switch session.ClassifyRestoreAction(current, rev) {
+			case session.RestoreRevive:
+				out := rev.ReviveOne(current)
+				if out.Err != nil {
+					uiLog.Warn("restore_revive_failed", slog.String("id", id), slog.String("err", out.Err.Error()))
+				} else {
+					counts.revived++
+				}
+			case session.RestoreRestart:
+				if err := current.Restart(); err != nil {
+					uiLog.Warn("restore_restart_failed", slog.String("id", id), slog.String("err", err.Error()))
+				} else {
+					// Successful restart re-opens the session.
+					current.WasOpen = true
+					counts.restarted++
+				}
+			case session.RestoreNoop, session.RestoreSkip:
+				// Already healthy, or row deleted between close and reopen.
+			}
+			return nil
+		})
+	}
+
+	gp := groupPath
+	steps = append(steps, func() tea.Msg {
+		return projectSessionsRestoredMsg{groupPath: gp, restarted: counts.restarted, revived: counts.revived}
+	})
+
+	return tea.Sequence(steps...)
+}
+
 // attachSession attaches to a session using custom PTY with Ctrl+Q detection
 func (h *Home) attachSession(inst *session.Instance) tea.Cmd {
 	tmuxSess := inst.GetTmuxSession()
@@ -9834,6 +10102,10 @@ func (h *Home) attachSession(inst *session.Instance) tea.Cmd {
 	// Do not synchronously save here; saving on attach blocks transition and causes
 	// visible blank-screen delay before tmux attach starts.
 	inst.MarkAccessed()
+	// Attaching marks the session "open" so it becomes a restore candidate if
+	// its tmux later dies during downtime (restore-last-opened-sessions). The
+	// next save cycle persists it.
+	inst.WasOpen = true
 
 	// #1114 follow-up: Claude's /rename fires no agent-deck hook, so an idle
 	// session's title and iTerm2 badge can be stale at attach time (the
@@ -10381,6 +10653,9 @@ func (h *Home) View() string {
 	// Overlays take full screen
 	if h.helpOverlay.IsVisible() {
 		return h.helpOverlay.View()
+	}
+	if h.recentSwitcher.IsVisible() {
+		return h.recentSwitcher.View()
 	}
 	if h.search.IsVisible() {
 		return h.search.View()

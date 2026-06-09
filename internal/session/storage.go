@@ -46,6 +46,7 @@ type InstanceData struct {
 	IsConductor        bool      `json:"is_conductor,omitempty"`         // True if this session is a conductor orchestrator
 	NoTransitionNotify bool      `json:"no_transition_notify,omitempty"` // Suppress transition event dispatch
 	TitleLocked        bool      `json:"title_locked,omitempty"`         // #697: block Claude session-name sync into Title
+	WasOpen            bool      `json:"was_open,omitempty"`             // open-last-time flag for project restore prompt
 	Command            string    `json:"command"`
 	Wrapper            string    `json:"wrapper,omitempty"`
 	Tool               string    `json:"tool"`
@@ -661,6 +662,7 @@ func instanceToRow(inst *Instance) (*statedb.InstanceRow, error) {
 		IsConductor:        inst.IsConductor,
 		NoTransitionNotify: inst.NoTransitionNotify,
 		TitleLocked:        inst.TitleLocked,
+		WasOpen:            inst.WasOpen,
 		WorktreePath:       inst.WorktreePath,
 		WorktreeRepo:       inst.WorktreeRepoRoot,
 		WorktreeBranch:     inst.WorktreeBranch,
@@ -764,6 +766,7 @@ func (s *Storage) LoadLite() ([]*InstanceData, []*GroupData, error) {
 			IsConductor:               r.IsConductor,
 			NoTransitionNotify:        r.NoTransitionNotify,
 			TitleLocked:               r.TitleLocked,
+			WasOpen:                   r.WasOpen,
 			Command:                   r.Command,
 			Wrapper:                   r.Wrapper,
 			Tool:                      r.Tool,
@@ -879,6 +882,7 @@ func (s *Storage) LoadWithGroups() ([]*Instance, []*GroupData, error) {
 			IsConductor:               r.IsConductor,
 			NoTransitionNotify:        r.NoTransitionNotify,
 			TitleLocked:               r.TitleLocked,
+			WasOpen:                   r.WasOpen,
 			Command:                   r.Command,
 			Wrapper:                   r.Wrapper,
 			Tool:                      r.Tool,
@@ -1130,6 +1134,7 @@ func (s *Storage) convertToInstances(data *StorageData) ([]*Instance, []*GroupDa
 			IsConductor:               instData.IsConductor,
 			NoTransitionNotify:        instData.NoTransitionNotify,
 			TitleLocked:               instData.TitleLocked,
+			WasOpen:                   instData.WasOpen,
 			Command:                   instData.Command,
 			Wrapper:                   instData.Wrapper,
 			Tool:                      instData.Tool,

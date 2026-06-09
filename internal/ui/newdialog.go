@@ -604,7 +604,9 @@ func (d *NewDialog) ApplyHighlightedModelSuggestion() {
 	if d.modelSuggestionActive && d.modelSuggestionCursor > 0 {
 		suggestionIdx := d.modelSuggestionCursor - 1
 		if suggestionIdx < len(d.modelSuggestions) {
-			d.modelInput.SetValue(d.modelSuggestions[suggestionIdx])
+			// The "Default" sentinel resolves to "" — selecting it clears any
+			// model (including a #1172 preselect) so no --model flag is emitted.
+			d.modelInput.SetValue(resolveModelSuggestion(d.modelSuggestions[suggestionIdx]))
 			d.modelInput.SetCursor(len(d.modelInput.Value()))
 		}
 		d.modelNavigated = true
@@ -886,23 +888,49 @@ func preselectDefaultModel(config *session.UserConfig, tool string) string {
 	return ""
 }
 
+// defaultModelSentinel is the picker label for the explicit "no model override"
+// choice. Selecting it stores an empty model so the agent CLI uses its own
+// configured default and ToArgs() emits no --model flag. It is distinct from the
+// [claude].default_model preselect (#1172); choosing it clears any preselect.
+const defaultModelSentinel = "Default"
+
 func (d *NewDialog) filterModelSuggestions() {
 	all := knownModelIDsForTool(d.GetSelectedCommand())
 	query := strings.ToLower(strings.TrimSpace(d.modelInput.Value()))
+	var catalog []string
 	if query == "" {
-		d.modelSuggestions = all
+		catalog = all
 	} else {
-		filtered := make([]string, 0, len(all))
+		catalog = make([]string, 0, len(all))
 		for _, modelID := range all {
 			if strings.Contains(strings.ToLower(modelID), query) {
-				filtered = append(filtered, modelID)
+				catalog = append(catalog, modelID)
 			}
 		}
-		d.modelSuggestions = filtered
+	}
+	// The explicit "Default" (no-override) entry sits first for every tool that
+	// supports a launch model and is NOT subject to the catalog substring filter:
+	// it must stay reachable even when the input already holds a preselected model
+	// (e.g. the #1172 [claude].default_model preselect), so the user can choose
+	// "Default" to clear that preselect back to no override.
+	if d.selectedToolSupportsModel() {
+		d.modelSuggestions = append([]string{defaultModelSentinel}, catalog...)
+	} else {
+		d.modelSuggestions = catalog
 	}
 	if d.modelSuggestionCursor > len(d.modelSuggestions) {
 		d.modelSuggestionCursor = 0
 	}
+}
+
+// resolveModelSuggestion maps a picker list entry to the value stored in the
+// model input. The "Default" sentinel resolves to "" (no override); every other
+// entry is a real model id used verbatim.
+func resolveModelSuggestion(entry string) string {
+	if entry == defaultModelSentinel {
+		return ""
+	}
+	return entry
 }
 
 // Show makes the dialog visible (uses default group)
