@@ -4585,7 +4585,11 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h.forceSaveInstances()
 		total := msg.restarted + msg.revived
 		if total > 0 {
-			h.setError(fmt.Errorf("restored %d session(s) in '%s'", total, msg.groupPath))
+			// Success feedback goes through the neutral status banner, NOT
+			// setError — the latter renders as a red error notification (the
+			// "error on entering a project" report). Mirrors the undo-restore
+			// path, which never routes a success through h.err.
+			h.maintenanceMsg = fmt.Sprintf("Restored %d session(s) in '%s'", total, msg.groupPath)
 		}
 		return h, nil
 
