@@ -2,6 +2,7 @@ package ui
 
 import (
 	"testing"
+	"time"
 
 	"github.com/asheshgoplani/agent-deck/internal/session"
 )
@@ -217,5 +218,125 @@ func TestNotifyDecision(t *testing.T) {
 				t.Fatalf("event: got %q want %q", event, tc.wantEvent)
 			}
 		})
+	}
+}
+
+// --- notifyTracker dwell/debounce behavior (false-positive flicker fix) ---
+
+const testDwell = 5 * time.Second
+
+func newTestTime() time.Time { return time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC) }
+
+// A status that is the very first thing the tracker sees for an instance is the
+// baseline (prev == ""), never an observed transition — so it must not fire,
+// even if it is Waiting and held well past the dwell. Prevents a ping storm for
+// already-waiting sessions at app startup.
+func TestNotifyTracker_BaselineNeverFires(t *testing.T) {
+	tr := newNotifyTracker()
+	t0 := newTestTime()
+	if fire, _ := tr.observe("a", session.StatusWaiting, false, allOn(), t0, testDwell); fire {
+		t.Fatal("baseline observe should not fire")
+	}
+	if fire, _ := tr.observe("a", session.StatusWaiting, false, allOn(), t0.Add(10*time.Second), testDwell); fire {
+		t.Fatal("baseline that stays Waiting past dwell should still not fire")
+	}
+}
+
+// A genuine transition that holds past the dwell fires exactly once.
+func TestNotifyTracker_FiresOnceAfterDwell(t *testing.T) {
+	tr := newNotifyTracker()
+	t0 := newTestTime()
+	// baseline running
+	tr.observe("a", session.StatusRunning, false, allOn(), t0, testDwell)
+	// transition into waiting; dwell not yet elapsed
+	if fire, _ := tr.observe("a", session.StatusWaiting, false, allOn(), t0.Add(1*time.Second), testDwell); fire {
+		t.Fatal("should not fire before dwell elapses")
+	}
+	// dwell elapsed → fires needs-input
+	fire, event := tr.observe("a", session.StatusWaiting, false, allOn(), t0.Add(1*time.Second).Add(testDwell), testDwell)
+	if !fire || event != notifyEventNeedsInput {
+		t.Fatalf("expected needs-input fire, got fire=%v event=%q", fire, event)
+	}
+	// same stable episode → does not re-fire
+	if fire, _ := tr.observe("a", session.StatusWaiting, false, allOn(), t0.Add(20*time.Second), testDwell); fire {
+		t.Fatal("should not re-fire within the same episode")
+	}
+}
+
+// Rapid flips shorter than the dwell never fire; once the status settles for
+// >= dwell it fires.
+func TestNotifyTracker_FlickerSuppressedThenFires(t *testing.T) {
+	tr := newNotifyTracker()
+	t0 := newTestTime()
+	tr.observe("a", session.StatusRunning, false, allOn(), t0, testDwell)
+	// oscillate every 2s (< 5s dwell): none of these episodes survives the dwell
+	flips := []struct {
+		s  session.Status
+		dt time.Duration
+	}{
+		{session.StatusWaiting, 2 * time.Second},
+		{session.StatusRunning, 4 * time.Second},
+		{session.StatusWaiting, 6 * time.Second},
+		{session.StatusError, 8 * time.Second},
+		{session.StatusRunning, 10 * time.Second},
+	}
+	for _, f := range flips {
+		if fire, _ := tr.observe("a", f.s, false, allOn(), t0.Add(f.dt), testDwell); fire {
+			t.Fatalf("flicker into %s should not fire", f.s)
+		}
+	}
+	// now settle into waiting and hold past the dwell
+	tr.observe("a", session.StatusWaiting, false, allOn(), t0.Add(12*time.Second), testDwell)
+	fire, event := tr.observe("a", session.StatusWaiting, false, allOn(), t0.Add(12*time.Second).Add(testDwell), testDwell)
+	if !fire || event != notifyEventNeedsInput {
+		t.Fatalf("settled waiting should fire needs-input, got fire=%v event=%q", fire, event)
+	}
+}
+
+// Attached pane is noise — never fires even after the dwell.
+func TestNotifyTracker_AttachedSuppressed(t *testing.T) {
+	tr := newNotifyTracker()
+	t0 := newTestTime()
+	tr.observe("a", session.StatusRunning, true, allOn(), t0, testDwell)
+	tr.observe("a", session.StatusWaiting, true, allOn(), t0.Add(1*time.Second), testDwell)
+	if fire, _ := tr.observe("a", session.StatusWaiting, true, allOn(), t0.Add(testDwell).Add(2*time.Second), testDwell); fire {
+		t.Fatal("attached pane should not fire")
+	}
+}
+
+// Running->Idle held past the dwell is a "finished" event; Idle reached from
+// Waiting (acknowledged) is not.
+func TestNotifyTracker_FinishedVsAcknowledged(t *testing.T) {
+	// finished: baseline running -> idle
+	tr := newNotifyTracker()
+	t0 := newTestTime()
+	tr.observe("fin", session.StatusRunning, false, allOn(), t0, testDwell)
+	tr.observe("fin", session.StatusIdle, false, allOn(), t0.Add(1*time.Second), testDwell)
+	fire, event := tr.observe("fin", session.StatusIdle, false, allOn(), t0.Add(1*time.Second).Add(testDwell), testDwell)
+	if !fire || event != notifyEventFinished {
+		t.Fatalf("running->idle should fire finished, got fire=%v event=%q", fire, event)
+	}
+
+	// acknowledged: baseline waiting -> idle must NOT fire finished
+	tr2 := newNotifyTracker()
+	tr2.observe("ack", session.StatusWaiting, false, allOn(), t0, testDwell)
+	tr2.observe("ack", session.StatusIdle, false, allOn(), t0.Add(1*time.Second), testDwell)
+	if fire, _ := tr2.observe("ack", session.StatusIdle, false, allOn(), t0.Add(1*time.Second).Add(testDwell), testDwell); fire {
+		t.Fatal("waiting->idle (acknowledged) should not fire finished")
+	}
+}
+
+// prune drops episodes for instances no longer present.
+func TestNotifyTracker_Prune(t *testing.T) {
+	tr := newNotifyTracker()
+	t0 := newTestTime()
+	tr.observe("keep", session.StatusRunning, false, allOn(), t0, testDwell)
+	tr.observe("drop", session.StatusRunning, false, allOn(), t0, testDwell)
+	tr.prune(map[string]bool{"keep": true})
+	if _, ok := tr.episodes["drop"]; ok {
+		t.Fatal("prune should have removed 'drop'")
+	}
+	if _, ok := tr.episodes["keep"]; !ok {
+		t.Fatal("prune should have kept 'keep'")
 	}
 }

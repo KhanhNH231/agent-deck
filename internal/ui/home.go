@@ -360,6 +360,9 @@ type Home struct {
 	// restoreReviver classifies restore candidates' live state. nil in
 	// production → lazily set to session.NewReviver(); tests inject a stub.
 	restoreReviver *session.Reviver
+	// notifyTracker debounces iTerm2 notifications so transient status flicker
+	// doesn't produce false "needs input"/"finished"/"error" pings.
+	notifyTracker *notifyTracker
 
 	// Context for cleanup
 	ctx    context.Context
@@ -928,6 +931,7 @@ func NewHomeWithProfileAndMode(profile string) *Home {
 		confirmDialog:        NewConfirmDialog(),
 		helpOverlay:          NewHelpOverlay(),
 		recentSwitcher:       NewRecentSwitcher(),
+		notifyTracker:        newNotifyTracker(),
 		mcpDialog:            NewMCPDialog(),
 		pluginDialog:         NewPluginDialog(),
 		editPathsDialog:      NewEditPathsDialog(),
@@ -3392,20 +3396,31 @@ func (h *Home) backgroundStatusUpdate() {
 				// has oscillated >3 times within 60s. One alert per burst.
 				session.GlobalFlickerDetector().Observe(inst.ID, string(newStatus))
 				tracker.record(inst.ID, inst.Title, inst.Tool, string(oldStatus), string(newStatus))
-
-				// iTerm2 OSC 9: notify on a qualifying transition for a
-				// BACKGROUND pane (not the one the user is attached to).
-				// Emits via /dev/tty + tmux DCS passthrough so the TUI frame
-				// on os.Stdout is untouched; tmux applies the iTerm2-active
-				// gate + AGENTDECK_ITERM_NOTIFY override.
-				if notifyCfg.ITermEnabled {
-					maybeNotifyTransition(oldStatus, newStatus, inst.Title, inst.ID == attachedID, notifyCfg)
-				}
 			}
 			return nil
 		})
 	}
 	_ = g.Wait() // Errors are logged within each goroutine
+
+	// iTerm2 OSC 9 notifications run AFTER the worker pool, single-threaded on
+	// this status-loop goroutine. Status detection flickers (running↔waiting↔
+	// error within ~2s — see flicker_detected); firing on every raw transition
+	// produced false "needs input" pings that had already resolved by the time
+	// the user navigated. notifyTracker only emits once a status has held
+	// stably for notifyStableDwell, suppressing transient flips, and de-dupes
+	// per stable episode. Skipped entirely when iTerm notifications are off.
+	if notifyCfg.ITermEnabled && h.notifyTracker != nil {
+		now := time.Now()
+		seen := make(map[string]bool, len(instances))
+		for _, inst := range instances {
+			seen[inst.ID] = true
+			cur := inst.GetStatusThreadSafe()
+			if fire, event := h.notifyTracker.observe(inst.ID, cur, inst.ID == attachedID, notifyCfg, now, notifyStableDwell); fire {
+				tmux.EmitITermNotificationViaTty(notifyMessage(inst.Title, event), notifyCfg.ITermEnabled)
+			}
+		}
+		h.notifyTracker.prune(seen)
+	}
 
 	statusDur := time.Since(statusStart)
 	tracker.tickEnd(statusStart, time.Now())

@@ -1,8 +1,10 @@
 package ui
 
 import (
+	"sync"
+	"time"
+
 	"github.com/asheshgoplani/agent-deck/internal/session"
-	"github.com/asheshgoplani/agent-deck/internal/tmux"
 )
 
 // Notification event names. Concise wording reused in both the decision result
@@ -92,20 +94,80 @@ func notifyMessage(title, event string) string {
 	return "Agent Deck: " + title
 }
 
-// maybeNotifyTransition is the side-effecting wrapper wired into the status
-// loop. It computes the decision and, if it fires, emits the OSC 9 via the
-// /dev/tty + tmux DCS passthrough path (so the TUI frame on os.Stdout is never
-// corrupted). The tmux emitter applies the iTerm2-active gate and the
-// AGENTDECK_ITERM_NOTIFY env override; we pass cfg.ITermEnabled as the
-// config-sourced default.
-//
-// No internal throttle: the only caller fires exclusively on an observed
-// oldStatus != newStatus change (the status loop's `if newStatus != oldStatus`
-// guard), so a steady state cannot produce repeated notifications.
-func maybeNotifyTransition(old, new session.Status, title string, isAttached bool, cfg NotifyConfig) {
-	fire, event := notifyDecision(old, new, isAttached, cfg)
-	if !fire {
-		return
+// notifyStableDwell is how long a session must hold a status before it emits an
+// iTerm2 notification. Status detection flickers (running↔waiting↔error within
+// ~2s — see the flicker_detected warnings); a dwell longer than that flicker
+// timescale suppresses transient flips while still alerting on genuinely-stable
+// states. Tune if the status-detection flicker window changes.
+const notifyStableDwell = 5 * time.Second
+
+// notifyEpisode is one continuous run of a single status for an instance. prev
+// is the status held in the immediately-preceding episode, so the reused
+// notifyDecision can recognize transition-shaped events (finished = Running→
+// Idle) from the stable snapshot. An empty prev marks the baseline episode —
+// the status the instance already had when the tracker first saw it — which is
+// never notified (it isn't an observed transition; avoids a startup ping storm).
+type notifyEpisode struct {
+	status session.Status
+	prev   session.Status
+	since  time.Time
+	fired  bool
+}
+
+// notifyTracker debounces iTerm2 notifications. It tracks each instance's
+// current status episode and authorizes an emit only once that episode has been
+// stable for notifyStableDwell, at most once per episode. A flip to a different
+// status before the dwell elapses resets the episode, so transient flicker is
+// never notified. Methods are mutex-guarded; the status loop is the sole caller
+// today, but the lock keeps it safe if that changes.
+type notifyTracker struct {
+	mu       sync.Mutex
+	episodes map[string]*notifyEpisode
+}
+
+func newNotifyTracker() *notifyTracker {
+	return &notifyTracker{episodes: make(map[string]*notifyEpisode)}
+}
+
+// observe records id's current status and returns (true, event) exactly once —
+// on the first call where the status has held for >= dwell and notifyDecision
+// (prev→cur) classifies it as a notify-worthy, non-attached event. Returns
+// (false, "") otherwise: dwell not yet elapsed, already fired this episode,
+// attached, disabled, or a baseline episode. now is injected for testability.
+func (t *notifyTracker) observe(id string, cur session.Status, isAttached bool, cfg NotifyConfig, now time.Time, dwell time.Duration) (bool, string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	ep := t.episodes[id]
+	if ep == nil || ep.status != cur {
+		prev := session.Status("")
+		if ep != nil {
+			prev = ep.status
+		}
+		ep = &notifyEpisode{status: cur, prev: prev, since: now}
+		t.episodes[id] = ep
 	}
-	tmux.EmitITermNotificationViaTty(notifyMessage(title, event), cfg.ITermEnabled)
+	if ep.fired || isAttached || !cfg.ITermEnabled || ep.prev == "" {
+		return false, ""
+	}
+	if now.Sub(ep.since) < dwell {
+		return false, ""
+	}
+	fire, event := notifyDecision(ep.prev, cur, isAttached, cfg)
+	if fire {
+		ep.fired = true
+	}
+	return fire, event
+}
+
+// prune drops episodes for instances no longer present (seen[id] == false),
+// bounding memory across session churn.
+func (t *notifyTracker) prune(seen map[string]bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for id := range t.episodes {
+		if !seen[id] {
+			delete(t.episodes, id)
+		}
+	}
 }
