@@ -44,6 +44,7 @@ const (
 	hotkeyWatcherPanel    = "watcher_panel"
 	hotkeyRecentSwitcher  = "recent_switcher"
 	hotkeyRecentProject   = "recent_project"
+	hotkeyProjectSort     = "project_sort"
 )
 
 var hotkeyActionOrder = []string{
@@ -83,6 +84,7 @@ var hotkeyActionOrder = []string{
 	hotkeyWatcherPanel,
 	hotkeyRecentSwitcher,
 	hotkeyRecentProject,
+	hotkeyProjectSort,
 }
 
 var defaultHotkeyBindings = map[string]string{
@@ -122,6 +124,7 @@ var defaultHotkeyBindings = map[string]string{
 	hotkeyWatcherPanel:    "w",
 	hotkeyRecentSwitcher:  "ctrl+o",
 	hotkeyRecentProject:   "ctrl+e",
+	hotkeyProjectSort:     "o",
 }
 
 var hotkeyActionDefaultTriggers = map[string][]string{

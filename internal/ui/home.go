@@ -256,6 +256,7 @@ type Home struct {
 	initialSelect       string         // Session ID or title to preselect on first load (#709). Does NOT scope groups.
 	initialSelectDone   bool           // Guard so preselection only fires once
 	previewMode         PreviewMode    // What to show in preview pane (both, output-only, analytics-only)
+	projectSortMode     projectSortMode // How root groups (projects) are ordered: manual (default) or by status
 	err                 error
 	errTime             time.Time  // When error occurred (for auto-dismiss)
 	isReloading         bool       // Visual feedback during auto-reload
@@ -605,6 +606,7 @@ type uiState struct {
 	CursorGroupPath string `json:"cursor_group_path,omitempty"`
 	PreviewMode     int    `json:"preview_mode"`
 	StatusFilter    string `json:"status_filter,omitempty"`
+	ProjectSortMode int    `json:"project_sort_mode,omitempty"`
 }
 
 type selectedItemIdentity struct {
@@ -1732,6 +1734,14 @@ func (h *Home) rebuildFlatItems() {
 			}
 		}
 		h.flatItems = expanded
+	}
+
+	// Reorder root-group blocks by aggregate status when the by-status sort
+	// mode is active (UI-only; persisted group Order is untouched). Done before
+	// remotes are appended (they always trail) and before RootGroupNum is
+	// assigned so the 1-9 hotkeys match the displayed order.
+	if h.projectSortMode == projectSortStatus {
+		h.flatItems = reorderRootGroupBlocksByStatus(h.flatItems)
 	}
 
 	// Append remote sessions as selectable items
@@ -7670,6 +7680,17 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		h.maintenanceMsg = "No other project to switch to"
 		return h, nil
 
+	case "o":
+		// Toggle project (root-group) ordering: manual <-> by-status. Persisted
+		// across restarts; reorders the list in place, keeping the cursor on the
+		// same item.
+		h.projectSortMode = h.projectSortMode.next()
+		identity := h.captureSelectedItemIdentity()
+		h.rebuildFlatItemsPreservingSelection(identity)
+		h.saveUIState()
+		h.maintenanceMsg = h.projectSortMode.label()
+		return h, nil
+
 	case "1", "2", "3", "4", "5", "6", "7", "8", "9":
 		// Quick jump to Nth root group (1-indexed)
 		targetNum := int(key[0] - '0') // Convert "1" -> 1, "2" -> 2, etc.
@@ -9008,8 +9029,9 @@ func (h *Home) saveUIState() {
 	}
 
 	state := uiState{
-		PreviewMode:  int(h.previewMode),
-		StatusFilter: string(h.statusFilter),
+		PreviewMode:     int(h.previewMode),
+		StatusFilter:    string(h.statusFilter),
+		ProjectSortMode: int(h.projectSortMode),
 	}
 
 	// Capture cursor position
@@ -9060,9 +9082,10 @@ func (h *Home) loadUIState() {
 		return
 	}
 
-	// Apply preview mode and status filter immediately
+	// Apply preview mode, status filter, and project sort mode immediately
 	h.previewMode = PreviewMode(state.PreviewMode)
 	h.statusFilter = session.Status(state.StatusFilter)
+	h.projectSortMode = projectSortMode(state.ProjectSortMode)
 
 	// Defer cursor restoration until flatItems are populated
 	h.pendingCursorRestore = &state
@@ -12514,6 +12537,7 @@ type groupRenderStats struct {
 	sessionCount int
 	running      int
 	waiting      int
+	errored      int
 }
 
 func (h *Home) buildGroupRenderStats(snapshot map[string]sessionRenderState) map[string]groupRenderStats {
@@ -12530,6 +12554,7 @@ func (h *Home) buildGroupRenderStats(snapshot map[string]sessionRenderState) map
 		directSessions := len(g.Sessions)
 		directRunning := 0
 		directWaiting := 0
+		directErrored := 0
 		for _, sess := range g.Sessions {
 			state, ok := snapshot[sess.ID]
 			status := sess.Status
@@ -12541,6 +12566,8 @@ func (h *Home) buildGroupRenderStats(snapshot map[string]sessionRenderState) map
 				directRunning++
 			case session.StatusWaiting:
 				directWaiting++
+			case session.StatusError:
+				directErrored++
 			}
 		}
 
@@ -12552,6 +12579,7 @@ func (h *Home) buildGroupRenderStats(snapshot map[string]sessionRenderState) map
 			entry.sessionCount += directSessions
 			entry.running += directRunning
 			entry.waiting += directWaiting
+			entry.errored += directErrored
 			stats[ancestor] = entry
 
 			idx := strings.LastIndex(ancestor, "/")
@@ -12646,6 +12674,9 @@ func (h *Home) renderGroupItem(
 	countStr := countStyle.Render(fmt.Sprintf(" (%d)", stats.sessionCount))
 
 	statusStr := ""
+	if stats.errored > 0 {
+		statusStr += " " + GroupStatusError.Render(fmt.Sprintf("✕ %d", stats.errored))
+	}
 	if stats.running > 0 {
 		statusStr += " " + GroupStatusRunning.Render(fmt.Sprintf("● %d", stats.running))
 	}

@@ -92,6 +92,13 @@ type GroupTree struct {
 //
 // Any future Status value not enumerated above defaults to 5 so it sorts
 // after every known bucket rather than silently slotting into "idle".
+// ActionablePriority exposes actionablePriority for callers outside this package
+// (e.g. the UI ordering projects by their most-actionable session). Lower means
+// more urgent: error(0) < waiting(1) < running(2) < idle(3) < stopped(4).
+func ActionablePriority(s Status) int {
+	return actionablePriority(s)
+}
+
 func actionablePriority(s Status) int {
 	switch s {
 	case StatusError:

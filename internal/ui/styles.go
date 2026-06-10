@@ -258,6 +258,7 @@ var (
 	GroupHotkeyStyle   lipgloss.Style
 	GroupStatusRunning lipgloss.Style
 	GroupStatusWaiting lipgloss.Style
+	GroupStatusError   lipgloss.Style
 
 	// Group selected styles
 	GroupNameSelStyle   lipgloss.Style
@@ -510,6 +511,7 @@ func initStyles() {
 	GroupHotkeyStyle = lipgloss.NewStyle().Foreground(ColorComment)
 	GroupStatusRunning = lipgloss.NewStyle().Foreground(ColorGreen)
 	GroupStatusWaiting = lipgloss.NewStyle().Foreground(ColorYellow)
+	GroupStatusError = lipgloss.NewStyle().Foreground(ColorRed)
 
 	// Group selected styles
 	GroupNameSelStyle = lipgloss.NewStyle().Bold(true).Foreground(ColorBg).Background(ColorAccent)
