@@ -201,6 +201,7 @@ func (h *HelpOverlay) View() string {
 	groupKey := h.key(hotkeyCreateGroup, "g")
 	undoKey := h.key(hotkeyUndoDelete, "Ctrl+Z")
 	recentSwitcherKey := h.key(hotkeyRecentSwitcher, "Ctrl+O")
+	recentProjectKey := h.key(hotkeyRecentProject, "Ctrl+E")
 
 	sections := []struct {
 		title string
@@ -221,6 +222,7 @@ func (h *HelpOverlay) View() string {
 				{"1-9", "Jump to root group"},
 				{"Space", "Jump mode"},
 				{recentSwitcherKey, "Recent sessions switcher (all projects)"},
+				{recentProjectKey, "Back to most recent project (toggle)"},
 				{"Enter", "Attach / toggle"},
 				{"Shift+Enter", "Open session in new iTerm window (macOS)"},
 			},

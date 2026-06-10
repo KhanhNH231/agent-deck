@@ -7658,37 +7658,16 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return h, cmd
 
 	case "ctrl+e":
-		// Open feedback dialog on demand (per D-11: bypasses ShouldShow -- user-initiated)
-		if h.feedbackDialog != nil {
-			st := h.feedbackState
-			if st == nil {
-				// Lazy-load state: h.feedbackState may be nil if the user already rated
-				// this version (auto-popup path skips loading state in that case).
-				// If load fails, create a safe default so Show() receives a non-nil pointer.
-				loaded, err := feedback.LoadState()
-				if err == nil {
-					h.feedbackState = loaded
-					st = loaded
-				} else {
-					uiLog.Warn("feedback: failed to load state for on-demand shortcut", "err", err)
-					h.feedbackState = &feedback.State{FeedbackEnabled: true, MaxShows: 3}
-					st = h.feedbackState
-				}
-			}
-			if h.feedbackSender == nil {
-				h.feedbackSender = feedback.NewSender()
-			}
-			// v1.7.38: ctrl+e is explicit user intent. If the user previously
-			// opted out (via CLI decline or TUI stepConfirm decline), re-enable
-			// the state in memory + on disk BEFORE calling Show() so the new
-			// "Show() no-ops on opt-out" guard does not block this path.
-			if st != nil && !st.FeedbackEnabled {
-				st.FeedbackEnabled = true
-				_ = feedback.SaveState(st)
-			}
-			h.feedbackDialog.Show(Version, st, h.feedbackSender)
-			h.feedbackDialog.SetSize(h.width, h.height)
+		// Back to most recent project (alt-tab). Jumps to the most-recently-worked
+		// session in another root group; repeated presses toggle the last two.
+		// (Feedback dialog still auto-appears on its own schedule — its former
+		// manual Ctrl+E shortcut was dropped in favor of this navigation.)
+		if target := h.recentProjectTarget(); target != nil {
+			h.jumpToSession(target)
+			h.markNavigationActivity()
+			return h, h.fetchSelectedPreview()
 		}
+		h.maintenanceMsg = "No other project to switch to"
 		return h, nil
 
 	case "1", "2", "3", "4", "5", "6", "7", "8", "9":
