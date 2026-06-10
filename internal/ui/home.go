@@ -9208,6 +9208,14 @@ func (h *Home) createSessionInGroupWithWorktreeAndOptions(
 				inst.MultiRepoTempDir = parentDir
 
 				wtResult := session.CreateMultiRepoWorktrees(allPaths, parentDir, worktreeBranch, session.GetWorktreeSettings().SetupTimeout())
+				if wtResult.Err != nil {
+					// A git repo could not be isolated. Abort rather than launch a
+					// session that silently aliases the live repo. Worktrees already
+					// created were rolled back inside CreateMultiRepoWorktrees; drop
+					// the (now-empty) parent dir too.
+					_ = os.RemoveAll(parentDir)
+					return sessionCreatedMsg{err: fmt.Errorf("multi-repo worktree: %w", wtResult.Err), tempID: tempID}
+				}
 				for _, w := range wtResult.Warnings {
 					uiLog.Warn("multi_repo_worktree", slog.String("detail", w))
 				}

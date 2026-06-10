@@ -60,7 +60,7 @@ func TestCreateMultiRepoWorktrees_BothReposGetWorktreeWithInclude(t *testing.T) 
 	assert.Empty(t, result.Warnings)
 }
 
-func TestCreateMultiRepoWorktrees_WorktreeCreationFailureFallsBackToSymlink(t *testing.T) {
+func TestCreateMultiRepoWorktrees_WorktreeCreationFailureIsFatalNoSymlink(t *testing.T) {
 	repo := initTestGitRepo(t)
 
 	parentDir := t.TempDir()
@@ -68,23 +68,45 @@ func TestCreateMultiRepoWorktrees_WorktreeCreationFailureFallsBackToSymlink(t *t
 
 	// First call succeeds — creates the branch+worktree
 	result1 := CreateMultiRepoWorktrees([]string{repo}, parentDir, branch, 0)
+	require.NoError(t, result1.Err)
 	require.Len(t, result1.Worktrees, 1)
 	require.Empty(t, result1.Warnings)
 
-	// Second call with same branch will fail (worktree already checked out)
+	// Second call with same branch fails (branch already checked out). Must be
+	// fatal — never symlink the live repo into the session dir.
 	parentDir2 := t.TempDir()
 	result2 := CreateMultiRepoWorktrees([]string{repo}, parentDir2, branch, 0)
 
-	require.Len(t, result2.MappedPaths, 1)
-	// Falls back to symlink
-	info, err := os.Lstat(result2.MappedPaths[0])
-	require.NoError(t, err)
-	assert.NotZero(t, info.Mode()&os.ModeSymlink)
-	// Reported as a warning
-	require.Len(t, result2.Warnings, 1)
-	assert.Contains(t, result2.Warnings[0], "worktree_create_fail")
-	// Not in Worktrees
-	assert.Empty(t, result2.Worktrees)
+	require.Error(t, result2.Err)
+	assert.Contains(t, result2.Err.Error(), repo)
+
+	// No symlink (no entry at all) was left behind for the failed repo.
+	_, statErr := os.Lstat(filepath.Join(parentDir2, filepath.Base(repo)))
+	assert.True(t, os.IsNotExist(statErr), "no entry should be created for the failed repo")
+}
+
+func TestCreateMultiRepoWorktrees_FatalFailureRollsBackEarlierWorktree(t *testing.T) {
+	repoA := initTestGitRepo(t)
+	repoB := initTestGitRepo(t)
+	branch := "test-branch"
+
+	// Pre-occupy repoB's branch so the second repo in the list fails.
+	occupied := t.TempDir()
+	pre := CreateMultiRepoWorktrees([]string{repoB}, occupied, branch, 0)
+	require.NoError(t, pre.Err)
+
+	// repoA succeeds, repoB fails → whole result is fatal and repoA's worktree
+	// must be rolled back (no orphaned registration in repoA).
+	parentDir := t.TempDir()
+	result := CreateMultiRepoWorktrees([]string{repoA, repoB}, parentDir, branch, 0)
+
+	require.Error(t, result.Err)
+	assert.Contains(t, result.Err.Error(), repoB)
+
+	// repoA's worktree was unregistered (only the pre-existing one remains in repoB).
+	out, err := exec.Command("git", "-C", repoA, "worktree", "list").CombinedOutput()
+	require.NoError(t, err, "git worktree list: %s", out)
+	assert.NotContains(t, string(out), parentDir, "repoA worktree should be rolled back")
 }
 
 func TestCreateMultiRepoWorktrees_NonGitPathGetsSymlinked(t *testing.T) {
