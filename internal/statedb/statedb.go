@@ -108,7 +108,12 @@ func withBusyRetry(op func() error) error {
 // whether a session was explicitly open (attached / started) the last time the
 // app ran, so a project re-expand can offer to restore sessions that were open
 // but are no longer alive. DEFAULT 0 makes legacy rows load as not-open.
-const SchemaVersion = 10
+//
+// v11 (workspace features, wsw absorption): `features` + `feature_repos`
+// tables model a named unit of work whose worktrees live under the managed
+// workspace root, with park/resume lifecycle. `instances.feature_id` links a
+// session to its feature; DEFAULT '' keeps legacy rows feature-less.
+const SchemaVersion = 11
 
 // StateDB wraps a SQLite database for session/group persistence.
 // Thread-safe for concurrent use from multiple goroutines within one process.
@@ -169,8 +174,11 @@ type InstanceRow struct {
 	// `[profiles.<account>.claude].config_dir` at spawn time and becomes the
 	// most-specific level in the CLAUDE_CONFIG_DIR resolution chain. Empty
 	// means "fall through to conductor/group/env/profile/global/default".
-	Account  string
-	ToolData json.RawMessage // JSON blob for tool-specific data
+	Account string
+	// FeatureID links the session to a workspace feature (v11). Empty for
+	// sessions that predate features or don't use worktrees.
+	FeatureID string
+	ToolData  json.RawMessage // JSON blob for tool-specific data
 }
 
 // WatcherRow represents a watcher row in the database.
@@ -356,11 +364,40 @@ func (s *StateDB) Migrate() error {
 			worktree_repo     TEXT NOT NULL DEFAULT '',
 			worktree_branch   TEXT NOT NULL DEFAULT '',
 			account           TEXT NOT NULL DEFAULT '',
+			feature_id        TEXT NOT NULL DEFAULT '',
 			tool_data       TEXT NOT NULL DEFAULT '{}',
 			acknowledged    INTEGER NOT NULL DEFAULT 0
 		)
 	`); err != nil {
 		return fmt.Errorf("statedb: create instances: %w", err)
+	}
+
+	// features + feature_repos tables (v11, workspace features)
+	if _, err := tx.Exec(`
+		CREATE TABLE IF NOT EXISTS features (
+			id         TEXT PRIMARY KEY,
+			name       TEXT UNIQUE NOT NULL,
+			state      TEXT NOT NULL DEFAULT 'active',
+			root_path  TEXT NOT NULL,
+			conductor  INTEGER NOT NULL DEFAULT 0,
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL
+		)
+	`); err != nil {
+		return fmt.Errorf("statedb: create features: %w", err)
+	}
+	if _, err := tx.Exec(`
+		CREATE TABLE IF NOT EXISTS feature_repos (
+			feature_id    TEXT NOT NULL REFERENCES features(id),
+			repo_name     TEXT NOT NULL,
+			repo_path     TEXT NOT NULL,
+			branch        TEXT NOT NULL,
+			base_ref      TEXT NOT NULL DEFAULT '',
+			worktree_path TEXT NOT NULL,
+			PRIMARY KEY (feature_id, repo_name)
+		)
+	`); err != nil {
+		return fmt.Errorf("statedb: create feature_repos: %w", err)
 	}
 
 	// groups table.
@@ -512,6 +549,9 @@ func (s *StateDB) Migrate() error {
 		// makes pre-v10 rows load as not-open (safe — restore only ADDS dead
 		// sessions back, never empties the table).
 		"ALTER TABLE instances ADD COLUMN was_open INTEGER NOT NULL DEFAULT 0",
+		// v11 (workspace features): session → feature link. Default '' keeps
+		// legacy rows feature-less.
+		"ALTER TABLE instances ADD COLUMN feature_id TEXT NOT NULL DEFAULT ''",
 	}
 	for _, stmt := range alterMigrations {
 		if _, err := tx.Exec(stmt); err != nil {
@@ -579,6 +619,15 @@ func (s *StateDB) Migrate() error {
 				}
 			}
 		}
+		if oldVer < 11 {
+			// v11: features tables are new (CREATE TABLE IF NOT EXISTS above
+			// handles creation); only the instances column needs an ALTER.
+			if _, err := tx.Exec(`ALTER TABLE instances ADD COLUMN feature_id TEXT NOT NULL DEFAULT ''`); err != nil {
+				if !strings.Contains(err.Error(), "duplicate column") {
+					return fmt.Errorf("statedb: migrate v11 feature_id: %w", err)
+				}
+			}
+		}
 		if _, err := tx.Exec(`
 			UPDATE metadata SET value = ? WHERE key = 'schema_version'
 		`, schemaVersion); err != nil {
@@ -638,15 +687,15 @@ func (s *StateDB) SaveInstance(inst *InstanceRow) error {
 			command, wrapper, tool, status, tmux_session, tmux_socket_name,
 			created_at, last_accessed,
 			parent_session_id, is_conductor, no_transition_notify,
-			worktree_path, worktree_repo, worktree_branch, account,
+			worktree_path, worktree_repo, worktree_branch, account, feature_id,
 			tool_data, title_locked, was_open
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		inst.ID, inst.Title, inst.ProjectPath, inst.GroupPath, inst.Order,
 		inst.Command, inst.Wrapper, inst.Tool, inst.Status, inst.TmuxSession, inst.TmuxSocketName,
 		inst.CreatedAt.Unix(), inst.LastAccessed.Unix(),
 		inst.ParentSessionID, isConductorInt, noTransitionNotifyInt,
-		inst.WorktreePath, inst.WorktreeRepo, inst.WorktreeBranch, inst.Account,
+		inst.WorktreePath, inst.WorktreeRepo, inst.WorktreeBranch, inst.Account, inst.FeatureID,
 		string(toolData), titleLockedInt, wasOpenInt,
 	)
 	return err
@@ -780,9 +829,9 @@ func (s *StateDB) saveInstancesOnce(insts []*InstanceRow) error {
 			command, wrapper, tool, status, tmux_session, tmux_socket_name,
 			created_at, last_accessed,
 			parent_session_id, is_conductor, no_transition_notify,
-			worktree_path, worktree_repo, worktree_branch, account,
+			worktree_path, worktree_repo, worktree_branch, account, feature_id,
 			tool_data, title_locked, was_open
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		return err
@@ -818,7 +867,7 @@ func (s *StateDB) saveInstancesOnce(insts []*InstanceRow) error {
 			inst.Command, inst.Wrapper, inst.Tool, inst.Status, inst.TmuxSession, inst.TmuxSocketName,
 			inst.CreatedAt.Unix(), inst.LastAccessed.Unix(),
 			inst.ParentSessionID, isConductorInt, noTransitionNotifyInt,
-			inst.WorktreePath, inst.WorktreeRepo, inst.WorktreeBranch, inst.Account,
+			inst.WorktreePath, inst.WorktreeRepo, inst.WorktreeBranch, inst.Account, inst.FeatureID,
 			string(toolData), titleLockedInt, wasOpenInt,
 		); err != nil {
 			return err
@@ -847,7 +896,7 @@ func (s *StateDB) LoadInstances() ([]*InstanceRow, error) {
 			command, wrapper, tool, status, tmux_session, tmux_socket_name,
 			created_at, last_accessed,
 			parent_session_id, is_conductor, no_transition_notify,
-			worktree_path, worktree_repo, worktree_branch, account,
+			worktree_path, worktree_repo, worktree_branch, account, feature_id,
 			tool_data, title_locked, was_open
 		FROM instances ORDER BY sort_order
 	`)
@@ -867,7 +916,7 @@ func (s *StateDB) LoadInstances() ([]*InstanceRow, error) {
 			&r.Command, &r.Wrapper, &r.Tool, &r.Status, &r.TmuxSession, &r.TmuxSocketName,
 			&createdUnix, &accessedUnix,
 			&r.ParentSessionID, &isConductorInt, &noTransitionNotifyInt,
-			&r.WorktreePath, &r.WorktreeRepo, &r.WorktreeBranch, &r.Account,
+			&r.WorktreePath, &r.WorktreeRepo, &r.WorktreeBranch, &r.Account, &r.FeatureID,
 			&toolDataStr, &titleLockedInt, &wasOpenInt,
 		); err != nil {
 			return nil, err
