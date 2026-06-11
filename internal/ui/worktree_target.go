@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"path/filepath"
 
 	"github.com/asheshgoplani/agent-deck/internal/git"
 	"github.com/asheshgoplani/agent-deck/internal/session"
@@ -34,6 +35,15 @@ func resolveWorktreeTarget(path, branch string, explicit bool) (worktreePath, re
 	root, err := git.GetWorktreeBaseRoot(path)
 	if err != nil {
 		return "", "", false, fmt.Sprintf("Failed to get repo root: %v", err)
+	}
+
+	// Managed workspace root (wsw absorption): every worktree session lives
+	// under <root>/<feature>/worktrees/<repo>, where the feature defaults to
+	// the branch name. Legacy [worktree] placement applies only when the
+	// [workspace] section is absent.
+	if ws := session.GetWorkspaceSettings(); ws.Enabled() {
+		worktreePath = git.FeatureWorktreePath(ws.RootDir(), branch, filepath.Base(root))
+		return worktreePath, root, false, ""
 	}
 
 	wtSettings := session.GetWorktreeSettings()
