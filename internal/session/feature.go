@@ -73,7 +73,16 @@ func RegisterWorktreeSessionFeature(db *statedb.StateDB, branch string, repos []
 		return "", nil
 	}
 	featureDir := git.FeatureDir(ws.RootDir(), branch)
-	return RegisterFeature(db, branch, featureDir, false, repos)
+	id, err := RegisterFeature(db, branch, featureDir, false, repos)
+	if err != nil {
+		return "", err
+	}
+	// Best-effort doc skeleton; never overwrites user edits, so safe on
+	// re-register (extend, resume, repeat sessions on the same branch).
+	if scErr := ScaffoldFeatureDocs(featureDir, branch, repos, false); scErr != nil {
+		return id, scErr
+	}
+	return id, nil
 }
 
 // ParkFeature removes a feature's worktrees while keeping its docs and
@@ -213,6 +222,31 @@ func ExtendFeature(db *statedb.StateDB, name, repoName, repoPath, baseRef string
 		return err
 	}
 	return nil
+}
+
+// MarkFeatureConductor flags a feature as conductor-orchestrated and
+// (re-)scaffolds its conductor docs: contracts/ and per-repo worker briefs.
+// Returns the feature row for callers that wire up the conductor session.
+func MarkFeatureConductor(db *statedb.StateDB, name string) (statedb.FeatureRow, error) {
+	f, repoRows, err := db.GetFeatureByName(name)
+	if err != nil {
+		return statedb.FeatureRow{}, fmt.Errorf("conductor: %w", err)
+	}
+	repos := make([]FeatureRepo, 0, len(repoRows))
+	for _, r := range repoRows {
+		repos = append(repos, FeatureRepo{
+			RepoName: r.RepoName, RepoPath: r.RepoPath, Branch: r.Branch,
+			BaseRef: r.BaseRef, WorktreePath: r.WorktreePath,
+		})
+	}
+	f.Conductor = true
+	if err := db.SaveFeature(f, repoRows); err != nil {
+		return statedb.FeatureRow{}, fmt.Errorf("conductor: %w", err)
+	}
+	if err := ScaffoldFeatureDocs(f.RootPath, name, repos, true); err != nil {
+		return statedb.FeatureRow{}, err
+	}
+	return f, nil
 }
 
 // DeleteFeature force-parks the feature, removes its directory (docs

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/asheshgoplani/agent-deck/internal/session"
@@ -136,6 +137,35 @@ func handleFeature(profile string, args []string) {
 		}
 		fmt.Printf("Deleted %q — feature dir removed; branches kept in their repos.\n", name)
 
+	case "conductor":
+		name := ""
+		if len(args) > 1 {
+			name = args[1]
+		}
+		if name == "" {
+			fmt.Fprintln(os.Stderr, "Usage: agent-deck feature conductor <name>")
+			os.Exit(1)
+		}
+		db := openDB()
+		f, err := func() (statedb.FeatureRow, error) {
+			defer db.Close()
+			return session.MarkFeatureConductor(db, name)
+		}()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Feature %q is now conductor-orchestrated: contracts/ and workers/ briefs scaffolded under %s\n", name, f.RootPath)
+		// Reuse the existing conductor infrastructure; the feature CLAUDE.md
+		// becomes the conductor's identity document.
+		conductorName := "conductor-" + strings.ReplaceAll(name, "/", "-")
+		fmt.Printf("Setting up conductor %q...\n", conductorName)
+		handleConductorSetup(profile, []string{
+			conductorName,
+			"-claude-md", f.RootPath + "/CLAUDE.md",
+			"-description", "Conductor for workspace feature " + name,
+		})
+
 	case "help", "--help", "-h":
 		printFeatureHelp()
 
@@ -154,6 +184,7 @@ Usage:
   agent-deck feature park <name> [--force]   Remove worktrees, keep docs+branches
   agent-deck feature resume <name>        Recreate worktrees from branches
   agent-deck feature extend <name> <repo> [--base ref]   Add a repo (manifest name or path)
+  agent-deck feature conductor <name>     Scaffold contracts/+briefs and set up conductor-<name>
   agent-deck feature delete <name>        Park + remove feature dir (branches kept)
 
 Features are registered automatically when a worktree session is created
