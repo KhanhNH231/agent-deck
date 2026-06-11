@@ -68,6 +68,9 @@ type InstanceData struct {
 	// Instance.Account for full semantics.
 	Account string `json:"account,omitempty"`
 
+	// FeatureID links the session to a workspace feature (schema v11).
+	FeatureID string `json:"feature_id,omitempty"`
+
 	// Claude session (persisted for resume after app restart)
 	ClaudeSessionID  string    `json:"claude_session_id,omitempty"`
 	ClaudeDetectedAt time.Time `json:"claude_detected_at,omitempty"`
@@ -667,6 +670,7 @@ func instanceToRow(inst *Instance) (*statedb.InstanceRow, error) {
 		WorktreeRepo:       inst.WorktreeRepoRoot,
 		WorktreeBranch:     inst.WorktreeBranch,
 		Account:            inst.Account,
+		FeatureID:          inst.FeatureID,
 		ToolData:           toolData,
 	}, nil
 }
@@ -779,6 +783,7 @@ func (s *Storage) LoadLite() ([]*InstanceData, []*GroupData, error) {
 			WorktreeRepoRoot:          r.WorktreeRepo,
 			WorktreeBranch:            r.WorktreeBranch,
 			Account:                   r.Account,
+			FeatureID:                 r.FeatureID,
 			ClaudeSessionID:           claudeSID,
 			ClaudeDetectedAt:          claudeAt,
 			GeminiSessionID:           geminiSID,
@@ -895,6 +900,7 @@ func (s *Storage) LoadWithGroups() ([]*Instance, []*GroupData, error) {
 			WorktreeRepoRoot:          r.WorktreeRepo,
 			WorktreeBranch:            r.WorktreeBranch,
 			Account:                   r.Account,
+			FeatureID:                 r.FeatureID,
 			ClaudeSessionID:           claudeSID,
 			ClaudeDetectedAt:          claudeAt,
 			GeminiSessionID:           geminiSID,
@@ -1145,6 +1151,7 @@ func (s *Storage) convertToInstances(data *StorageData) ([]*Instance, []*GroupDa
 			WorktreeRepoRoot:          instData.WorktreeRepoRoot,
 			WorktreeBranch:            instData.WorktreeBranch,
 			Account:                   instData.Account,
+			FeatureID:                 instData.FeatureID,
 			TmuxSocketName:            instData.TmuxSocketName,
 			ClaudeSessionID:           instData.ClaudeSessionID,
 			ClaudeDetectedAt:          instData.ClaudeDetectedAt,

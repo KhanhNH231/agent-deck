@@ -183,3 +183,28 @@ func TestDeleteFeatureRemovesDirAndRows(t *testing.T) {
 		t.Fatal("feature row should be gone")
 	}
 }
+
+func TestRegisterWorktreeSessionFeature(t *testing.T) {
+	db := openFeatureTestDB(t)
+	writeWorkspaceConfig(t, "[workspace]\nroot = \"~/ws\"\n")
+
+	id, err := RegisterWorktreeSessionFeature(db, "feat/x", []FeatureRepo{{
+		RepoName: "alpha", RepoPath: "/r/alpha", Branch: "feat/x", WorktreePath: "/ws/feat-x/worktrees/alpha",
+	}})
+	if err != nil || id == "" {
+		t.Fatalf("expected registration, got id=%q err=%v", id, err)
+	}
+	f, _, err := db.GetFeatureByName("feat/x")
+	if err != nil || f.State != FeatureStateActive {
+		t.Fatalf("feature = %+v err=%v", f, err)
+	}
+}
+
+func TestRegisterWorktreeSessionFeatureNoopWhenDisabled(t *testing.T) {
+	db := openFeatureTestDB(t)
+	writeWorkspaceConfig(t, "")
+	id, err := RegisterWorktreeSessionFeature(db, "feat/x", []FeatureRepo{{RepoName: "a"}})
+	if err != nil || id != "" {
+		t.Fatalf("expected noop, got id=%q err=%v", id, err)
+	}
+}

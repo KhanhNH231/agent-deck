@@ -63,6 +63,19 @@ func RegisterFeature(db *statedb.StateDB, name, rootPath string, conductor bool,
 	return id, nil
 }
 
+// RegisterWorktreeSessionFeature registers (or refreshes) the feature backing
+// a worktree session under the managed workspace root. The feature is named
+// after the branch. Returns "" without error when the workspace is disabled
+// or db is nil, so call sites can wire it unconditionally.
+func RegisterWorktreeSessionFeature(db *statedb.StateDB, branch string, repos []FeatureRepo) (string, error) {
+	ws := GetWorkspaceSettings()
+	if db == nil || !ws.Enabled() || branch == "" || len(repos) == 0 {
+		return "", nil
+	}
+	featureDir := git.FeatureDir(ws.RootDir(), branch)
+	return RegisterFeature(db, branch, featureDir, false, repos)
+}
+
 // ParkFeature removes a feature's worktrees while keeping its docs and
 // branches, then marks it parked. Safety gates, all checked BEFORE anything
 // is removed (all-or-nothing):

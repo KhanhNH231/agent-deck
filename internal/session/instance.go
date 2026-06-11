@@ -119,6 +119,11 @@ type Instance struct {
 	// pre-#924 sessions keep their existing behavior unchanged.
 	Account string `json:"account,omitempty"`
 
+	// FeatureID links the session to a workspace feature (schema v11,
+	// wsw absorption). Set when a worktree session is created under the
+	// managed workspace root; empty otherwise.
+	FeatureID string `json:"feature_id,omitempty"`
+
 	// Multi-repo support
 	MultiRepoEnabled   bool                `json:"multi_repo_enabled,omitempty"`
 	AdditionalPaths    []string            `json:"additional_paths,omitempty"`    // Paths beyond ProjectPath

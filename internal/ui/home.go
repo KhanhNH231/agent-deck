@@ -9155,6 +9155,20 @@ func (h *Home) createSessionInGroupWithWorktreeAndOptions(
 			if worktreeBackend != nil {
 				inst.WorktreeType = string(worktreeBackend.Type())
 			}
+			// Workspace feature: a single-repo worktree session is a 1-repo
+			// feature named after its branch (no-op when workspace disabled).
+			if !multiRepoEnabled {
+				fid, fErr := session.RegisterWorktreeSessionFeature(statedb.GetGlobal(), worktreeBranch, []session.FeatureRepo{{
+					RepoName:     filepath.Base(worktreeRepoRoot),
+					RepoPath:     worktreeRepoRoot,
+					Branch:       worktreeBranch,
+					WorktreePath: worktreePath,
+				}})
+				if fErr != nil {
+					uiLog.Warn("feature_register_failed", slog.String("error", fErr.Error()))
+				}
+				inst.FeatureID = fid
+			}
 		}
 
 		applyCreateSessionToolOverrides(inst, tool, geminiYoloMode)
@@ -9232,6 +9246,23 @@ func (h *Home) createSessionInGroupWithWorktreeAndOptions(
 				inst.MultiRepoWorktrees = wtResult.Worktrees
 				inst.ProjectPath = wtResult.MappedPaths[0]
 				inst.AdditionalPaths = wtResult.MappedPaths[1:]
+
+				// Workspace feature: register the branch-named feature with the
+				// full repo snapshot (no-op when workspace disabled).
+				featureRepos := make([]session.FeatureRepo, 0, len(wtResult.Worktrees))
+				for _, wt := range wtResult.Worktrees {
+					featureRepos = append(featureRepos, session.FeatureRepo{
+						RepoName:     filepath.Base(wt.RepoRoot),
+						RepoPath:     wt.RepoRoot,
+						Branch:       wt.Branch,
+						WorktreePath: wt.WorktreePath,
+					})
+				}
+				fid, fErr := session.RegisterWorktreeSessionFeature(statedb.GetGlobal(), worktreeBranch, featureRepos)
+				if fErr != nil {
+					uiLog.Warn("feature_register_failed", slog.String("error", fErr.Error()))
+				}
+				inst.FeatureID = fid
 			} else {
 				// Multi-repo without worktree: create a persistent parent dir with symlinks.
 				home, _ := os.UserHomeDir()
