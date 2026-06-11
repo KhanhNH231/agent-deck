@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/asheshgoplani/agent-deck/internal/git"
@@ -206,5 +207,40 @@ func TestRegisterWorktreeSessionFeatureNoopWhenDisabled(t *testing.T) {
 	id, err := RegisterWorktreeSessionFeature(db, "feat/x", []FeatureRepo{{RepoName: "a"}})
 	if err != nil || id != "" {
 		t.Fatalf("expected noop, got id=%q err=%v", id, err)
+	}
+}
+
+func TestExtendFeatureAddsRealWorktree(t *testing.T) {
+	db := openFeatureTestDB(t)
+	_, featureDir, _, _ := startTestFeature(t, db, "login")
+	repoB := initFeatureTestRepo(t, "beta")
+
+	if err := ExtendFeature(db, "login", "beta", repoB, ""); err != nil {
+		t.Fatalf("ExtendFeature: %v", err)
+	}
+
+	_, repos, err := db.GetFeatureByName("login")
+	if err != nil || len(repos) != 2 {
+		t.Fatalf("repos = %+v err=%v", repos, err)
+	}
+	wtB := filepath.Join(featureDir, "worktrees", "beta")
+	fi, err := os.Lstat(wtB)
+	if err != nil {
+		t.Fatalf("beta worktree missing: %v", err)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		t.Fatal("beta worktree is a symlink — must be real")
+	}
+	out := gitOut(t, repoB, "branch", "--list", "login")
+	if len(strings.TrimSpace(out)) == 0 {
+		t.Fatal("branch login not created in beta")
+	}
+}
+
+func TestExtendFeatureRejectsDuplicateRepo(t *testing.T) {
+	db := openFeatureTestDB(t)
+	_, _, repoA, _ := startTestFeature(t, db, "login")
+	if err := ExtendFeature(db, "login", "alpha", repoA, ""); err == nil {
+		t.Fatal("expected duplicate-repo rejection")
 	}
 }

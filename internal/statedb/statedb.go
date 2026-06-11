@@ -112,7 +112,7 @@ func withBusyRetry(op func() error) error {
 // v11 (workspace features, wsw absorption): `features` + `feature_repos`
 // tables model a named unit of work whose worktrees live under the managed
 // workspace root, with park/resume lifecycle. `instances.feature_id` links a
-// session to its feature; DEFAULT '' keeps legacy rows feature-less.
+// session to its feature; the empty-string default keeps legacy rows feature-less.
 const SchemaVersion = 11
 
 // StateDB wraps a SQLite database for session/group persistence.

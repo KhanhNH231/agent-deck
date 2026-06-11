@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"text/tabwriter"
 
 	"github.com/asheshgoplani/agent-deck/internal/session"
@@ -92,6 +93,32 @@ func handleFeature(profile string, args []string) {
 		}
 		fmt.Printf("Resumed %q — worktrees recreated from their branches.\n", name)
 
+	case "extend":
+		fs := flag.NewFlagSet("feature extend", flag.ExitOnError)
+		base := fs.String("base", "", "base ref for the new branch (default: repo's manifest default_base, else current HEAD)")
+		_ = fs.Parse(args[1:])
+		name, repoArg := fs.Arg(0), fs.Arg(1)
+		if name == "" || repoArg == "" {
+			fmt.Fprintln(os.Stderr, "Usage: agent-deck feature extend <name> <repo> [--base ref]\n  <repo> is a [[repos]] manifest name or a path to a git repo")
+			os.Exit(1)
+		}
+		repoName, repoPath, baseRef := repoArg, repoArg, *base
+		if def, ok := session.FindManifestRepo(repoArg); ok {
+			repoPath = def.PathExpanded()
+			if baseRef == "" {
+				baseRef = def.DefaultBase
+			}
+		} else {
+			repoName = filepath.Base(repoArg)
+		}
+		db := openDB()
+		defer db.Close()
+		if err := session.ExtendFeature(db, name, repoName, repoPath, baseRef); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Extended %q with %s. Restart the feature's session(s) to pick up the new repo.\n", name, repoName)
+
 	case "delete", "rm":
 		name := ""
 		if len(args) > 1 {
@@ -126,6 +153,7 @@ Usage:
   agent-deck feature list                 List features and their state
   agent-deck feature park <name> [--force]   Remove worktrees, keep docs+branches
   agent-deck feature resume <name>        Recreate worktrees from branches
+  agent-deck feature extend <name> <repo> [--base ref]   Add a repo (manifest name or path)
   agent-deck feature delete <name>        Park + remove feature dir (branches kept)
 
 Features are registered automatically when a worktree session is created

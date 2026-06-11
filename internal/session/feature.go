@@ -155,6 +155,66 @@ func ResumeFeature(db *statedb.StateDB, name string) error {
 	return db.SetFeatureState(f.ID, FeatureStateActive)
 }
 
+// ExtendFeature adds a repo to an existing feature: creates a REAL worktree
+// for it under <feature-root>/worktrees/<repoName> on the feature's branch
+// (created from baseRef when given, e.g. "origin/master") and appends the
+// repo to the feature's snapshot. Fails loudly; never symlinks a live repo.
+func ExtendFeature(db *statedb.StateDB, name, repoName, repoPath, baseRef string) error {
+	f, repos, err := db.GetFeatureByName(name)
+	if err != nil {
+		return fmt.Errorf("extend: %w", err)
+	}
+	for _, r := range repos {
+		if r.RepoName == repoName || r.RepoPath == repoPath {
+			return fmt.Errorf("extend %q: repo %s already part of the feature", name, repoName)
+		}
+	}
+	branch := name
+	if len(repos) > 0 && repos[0].Branch != "" {
+		branch = repos[0].Branch
+	}
+	if !git.IsGitRepoOrBareProjectRoot(repoPath) {
+		return fmt.Errorf("extend %q: %s is not a git repository", name, repoPath)
+	}
+	repoRoot, err := git.GetWorktreeBaseRoot(repoPath)
+	if err != nil {
+		return fmt.Errorf("extend %q: resolve repo root: %w", name, err)
+	}
+
+	wtPath := filepath.Join(f.RootPath, "worktrees", repoName)
+	if err := os.MkdirAll(filepath.Dir(wtPath), 0o755); err != nil {
+		return fmt.Errorf("extend %q: %w", name, err)
+	}
+	if baseRef != "" {
+		if _, err := git.CreateWorktreeAtStartPoint(repoRoot, wtPath, branch, baseRef); err != nil {
+			return fmt.Errorf("extend %q: worktree %s: %w", name, repoName, err)
+		}
+	} else {
+		if err := git.CreateWorktree(repoRoot, wtPath, branch); err != nil {
+			return fmt.Errorf("extend %q: worktree %s: %w", name, repoName, err)
+		}
+	}
+
+	newRepos := make([]FeatureRepo, 0, len(repos)+1)
+	for _, r := range repos {
+		newRepos = append(newRepos, FeatureRepo{
+			RepoName: r.RepoName, RepoPath: r.RepoPath, Branch: r.Branch,
+			BaseRef: r.BaseRef, WorktreePath: r.WorktreePath,
+		})
+	}
+	newRepos = append(newRepos, FeatureRepo{
+		RepoName: repoName, RepoPath: repoRoot, Branch: branch,
+		BaseRef: baseRef, WorktreePath: wtPath,
+	})
+	if _, err := RegisterFeature(db, name, f.RootPath, f.Conductor, newRepos); err != nil {
+		// The worktree exists but the snapshot update failed — roll it back
+		// so disk and DB stay consistent.
+		_ = git.RemoveWorktree(repoRoot, wtPath, true)
+		return err
+	}
+	return nil
+}
+
 // DeleteFeature force-parks the feature, removes its directory (docs
 // included), and deletes its rows. Branches stay in their repos.
 func DeleteFeature(db *statedb.StateDB, name string) error {
