@@ -131,6 +131,16 @@ type UserConfig struct {
 	// Worktree defines git worktree preferences
 	Worktree WorktreeSettings `toml:"worktree"`
 
+	// Workspace configures the managed workspace root (wsw absorption). When
+	// set, ALL worktree sessions are placed under
+	// <root>/<feature>/worktrees/<repo-name>/ and [worktree].default_location
+	// is only honored as a legacy fallback when this section is absent.
+	Workspace WorkspaceSettings `toml:"workspace"`
+
+	// Repos is the [[repos]] manifest: named repos that feature dialogs and
+	// commands can pick without typing paths.
+	Repos []RepoDef `toml:"repos"`
+
 	// GlobalSearch defines global conversation search settings
 	GlobalSearch GlobalSearchSettings `toml:"global_search"`
 
@@ -1333,6 +1343,37 @@ type CrushSettings struct {
 	// YoloMode enables --yolo flag for Crush sessions (auto-accept all
 	// permission prompts). Default: false
 	YoloMode bool `toml:"yolo_mode"`
+}
+
+// WorkspaceSettings configures the managed workspace root. When Root is
+// non-empty every worktree session lives under
+// <root>/<feature-slug>/worktrees/<repo-name>/, with the feature's docs
+// directly in <root>/<feature-slug>/.
+type WorkspaceSettings struct {
+	// Root is the workspace root directory, e.g. "~/Documents/Projects/workspaces".
+	Root string `toml:"root"`
+}
+
+// Enabled reports whether the managed workspace root is configured.
+func (w WorkspaceSettings) Enabled() bool {
+	return strings.TrimSpace(w.Root) != ""
+}
+
+// RootDir returns the workspace root with env vars and ~ expanded.
+func (w WorkspaceSettings) RootDir() string {
+	return ExpandPath(strings.TrimSpace(w.Root))
+}
+
+// RepoDef is one entry of the [[repos]] manifest.
+type RepoDef struct {
+	Name        string `toml:"name"`
+	Path        string `toml:"path"`
+	DefaultBase string `toml:"default_base"`
+}
+
+// PathExpanded returns the repo path with env vars and ~ expanded.
+func (r RepoDef) PathExpanded() string {
+	return ExpandPath(r.Path)
 }
 
 // WorktreeSettings contains git worktree preferences.
@@ -2800,6 +2841,35 @@ func GetLogSettings() LogSettings {
 	}
 
 	return settings
+}
+
+// GetWorkspaceSettings returns the managed-workspace settings. Zero value
+// (disabled) on load error or when the [workspace] section is absent.
+func GetWorkspaceSettings() WorkspaceSettings {
+	config, err := LoadUserConfig()
+	if err != nil || config == nil {
+		return WorkspaceSettings{}
+	}
+	return config.Workspace
+}
+
+// GetManifestRepos returns the [[repos]] manifest entries (nil when none).
+func GetManifestRepos() []RepoDef {
+	config, err := LoadUserConfig()
+	if err != nil || config == nil {
+		return nil
+	}
+	return config.Repos
+}
+
+// FindManifestRepo looks up a manifest repo by name.
+func FindManifestRepo(name string) (RepoDef, bool) {
+	for _, r := range GetManifestRepos() {
+		if r.Name == name {
+			return r, true
+		}
+	}
+	return RepoDef{}, false
 }
 
 // GetWorktreeSettings returns worktree settings with defaults applied
