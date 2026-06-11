@@ -35,6 +35,12 @@
 4. **wsw retirement:** old wsw still works for its existing features (fresh
    start, no importer). Retire once active wsw features finish.
 5. **wsw rebase/status:** not ported (out of scope per spec).
+6. **Stale worktree registrations on raw session delete:** deleting a
+   multi-repo feature session via plain session-delete RemoveAll's
+   `<feature>/worktrees` without `git worktree remove`, so a later
+   `feature resume` can fail until `git -C <repo> worktree prune`.
+   Fix candidate: make ResumeFeature prune before recreate, or route
+   session-delete cleanup through git.RemoveWorktree for feature sessions.
 
 ## Known pre-existing test failures (NOT from this work)
 
