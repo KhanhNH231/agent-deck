@@ -1,0 +1,170 @@
+package session
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/asheshgoplani/agent-deck/internal/git"
+	"github.com/asheshgoplani/agent-deck/internal/statedb"
+)
+
+// FeatureRepo describes one repo participating in a feature. Mirrors
+// statedb.FeatureRepoRow without the FeatureID back-reference so callers can
+// build the set before the feature exists.
+type FeatureRepo struct {
+	RepoName     string
+	RepoPath     string
+	Branch       string
+	BaseRef      string
+	WorktreePath string
+}
+
+// FeatureStateActive / FeatureStateParked are the feature lifecycle states.
+const (
+	FeatureStateActive = "active"
+	FeatureStateParked = "parked"
+)
+
+// RegisterFeature persists a feature row plus its repo snapshot. Idempotent
+// on name: re-registering an existing feature keeps its ID, replaces the repo
+// snapshot, and re-activates it.
+func RegisterFeature(db *statedb.StateDB, name, rootPath string, conductor bool, repos []FeatureRepo) (string, error) {
+	if strings.TrimSpace(name) == "" {
+		return "", errors.New("feature name must not be empty")
+	}
+	id := GenerateID()
+	if existing, _, err := db.GetFeatureByName(name); err == nil {
+		id = existing.ID
+	}
+	rows := make([]statedb.FeatureRepoRow, 0, len(repos))
+	for _, r := range repos {
+		rows = append(rows, statedb.FeatureRepoRow{
+			FeatureID:    id,
+			RepoName:     r.RepoName,
+			RepoPath:     r.RepoPath,
+			Branch:       r.Branch,
+			BaseRef:      r.BaseRef,
+			WorktreePath: r.WorktreePath,
+		})
+	}
+	err := db.SaveFeature(statedb.FeatureRow{
+		ID:        id,
+		Name:      name,
+		State:     FeatureStateActive,
+		RootPath:  rootPath,
+		Conductor: conductor,
+	}, rows)
+	if err != nil {
+		return "", fmt.Errorf("register feature %q: %w", name, err)
+	}
+	return id, nil
+}
+
+// ParkFeature removes a feature's worktrees while keeping its docs and
+// branches, then marks it parked. Safety gates, all checked BEFORE anything
+// is removed (all-or-nothing):
+//   - feature root must not be a symlink
+//   - the current working directory must not be inside a target worktree
+//   - every worktree must be clean unless force is set
+func ParkFeature(db *statedb.StateDB, name string, force bool) error {
+	f, repos, err := db.GetFeatureByName(name)
+	if err != nil {
+		return fmt.Errorf("park: %w", err)
+	}
+
+	if fi, err := os.Lstat(f.RootPath); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("park %q: feature root %s is a symlink — refusing", name, f.RootPath)
+	}
+	cwd, _ := os.Getwd()
+	var problems []string
+	for _, r := range repos {
+		if r.WorktreePath == "" {
+			continue
+		}
+		if cwd != "" && pathWithin(cwd, r.WorktreePath) {
+			problems = append(problems, fmt.Sprintf("cwd is inside %s", r.WorktreePath))
+			continue
+		}
+		if _, err := os.Stat(r.WorktreePath); os.IsNotExist(err) {
+			continue // already gone — parking is idempotent
+		}
+		if !force {
+			dirty, err := git.HasUncommittedChanges(r.WorktreePath)
+			if err != nil {
+				problems = append(problems, fmt.Sprintf("%s: dirty-check failed: %v", r.RepoName, err))
+			} else if dirty {
+				problems = append(problems, fmt.Sprintf("%s has uncommitted changes (use force)", r.RepoName))
+			}
+		}
+	}
+	if len(problems) > 0 {
+		return fmt.Errorf("park %q refused: %s", name, strings.Join(problems, "; "))
+	}
+
+	for _, r := range repos {
+		if r.WorktreePath == "" {
+			continue
+		}
+		if _, err := os.Stat(r.WorktreePath); os.IsNotExist(err) {
+			continue
+		}
+		if err := git.RemoveWorktree(r.RepoPath, r.WorktreePath, force); err != nil {
+			return fmt.Errorf("park %q: remove worktree %s: %w", name, r.RepoName, err)
+		}
+	}
+
+	return db.SetFeatureState(f.ID, FeatureStateParked)
+}
+
+// ResumeFeature recreates a parked feature's worktrees from their existing
+// branches and marks it active. Worktrees that already exist are kept as-is.
+func ResumeFeature(db *statedb.StateDB, name string) error {
+	f, repos, err := db.GetFeatureByName(name)
+	if err != nil {
+		return fmt.Errorf("resume: %w", err)
+	}
+	for _, r := range repos {
+		if r.WorktreePath == "" {
+			continue
+		}
+		if _, err := os.Stat(r.WorktreePath); err == nil {
+			continue
+		}
+		// The branch survived park, so CreateWorktree takes its existing-branch
+		// path (plain `git worktree add <path> <branch>`).
+		if err := git.CreateWorktree(r.RepoPath, r.WorktreePath, r.Branch); err != nil {
+			return fmt.Errorf("resume %q: worktree %s: %w", name, r.RepoName, err)
+		}
+	}
+	return db.SetFeatureState(f.ID, FeatureStateActive)
+}
+
+// DeleteFeature force-parks the feature, removes its directory (docs
+// included), and deletes its rows. Branches stay in their repos.
+func DeleteFeature(db *statedb.StateDB, name string) error {
+	f, _, err := db.GetFeatureByName(name)
+	if err != nil {
+		return fmt.Errorf("delete: %w", err)
+	}
+	if err := ParkFeature(db, name, true); err != nil {
+		return err
+	}
+	if f.RootPath != "" {
+		if err := os.RemoveAll(f.RootPath); err != nil {
+			return fmt.Errorf("delete %q: remove %s: %w", name, f.RootPath, err)
+		}
+	}
+	return db.DeleteFeature(f.ID)
+}
+
+// pathWithin reports whether path is dir or inside dir.
+func pathWithin(path, dir string) bool {
+	rel, err := filepath.Rel(dir, path)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (!strings.HasPrefix(rel, "..") && !filepath.IsAbs(rel))
+}
