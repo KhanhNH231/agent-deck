@@ -9201,6 +9201,14 @@ func (h *Home) createSessionInGroupWithWorktreeAndOptions(
 				sanitizedBranch = strings.ReplaceAll(sanitizedBranch, " ", "-")
 				parentDir := filepath.Join(home, ".agent-deck", "multi-repo-worktrees",
 					fmt.Sprintf("%s-%s", sanitizedBranch, inst.ID[:8]))
+				// Managed workspace root: worktrees live in
+				// <root>/<feature>/worktrees/ (feature = branch). The session
+				// cwd is the worktrees dir, NOT the feature dir, so the
+				// existing MultiRepoTempDir cleanup can never delete the
+				// feature's docs living one level up.
+				if ws := session.GetWorkspaceSettings(); ws.Enabled() {
+					parentDir = filepath.Join(git.FeatureDir(ws.RootDir(), worktreeBranch), "worktrees")
+				}
 				if mkErr := os.MkdirAll(parentDir, 0o755); mkErr != nil {
 					return sessionCreatedMsg{err: fmt.Errorf("failed to create multi-repo worktree dir: %w", mkErr), tempID: tempID}
 				}
