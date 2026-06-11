@@ -313,6 +313,9 @@ func main() {
 		case "worktree", "wt":
 			handleWorktree(profile, args[1:])
 			return
+		case "feature", "feat":
+			handleFeature(profile, args[1:])
+			return
 		case "costs":
 			handleCosts(profile, args[1:])
 			return
