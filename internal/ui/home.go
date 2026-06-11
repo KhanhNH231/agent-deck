@@ -8602,23 +8602,60 @@ func (h *Home) applyMultiRepoPathChanges(inst *session.Instance, newPaths []stri
 			return sessionRestartedMsg{sessionID: id, err: fmt.Errorf("no multi-repo temp dir")}
 		}
 
-		// Remove all existing symlinks/entries in tempDir
-		entries, _ := os.ReadDir(tempDir)
-		for _, entry := range entries {
-			_ = os.RemoveAll(filepath.Join(tempDir, entry.Name()))
-		}
-
-		// Create new symlinks
-		dirnames := session.DeduplicateDirnames(newPaths)
 		var newProjectPath string
 		var newAdditionalPaths []string
-		for i, p := range newPaths {
-			linkPath := filepath.Join(tempDir, dirnames[i])
-			_ = os.Symlink(p, linkPath)
-			if i == 0 {
-				newProjectPath = linkPath
-			} else {
-				newAdditionalPaths = append(newAdditionalPaths, linkPath)
+		var newWorktrees []session.MultiRepoWorktree
+
+		if current.WorktreeBranch != "" {
+			// Worktree session: repos must stay isolated. Reconcile keeps
+			// surviving worktrees untouched (uncommitted work preserved),
+			// creates REAL worktrees for added repos (never a live-repo
+			// symlink), and unregisters dropped ones. Same fail-loud rule as
+			// session creation.
+			res := session.ReconcileMultiRepoWorktrees(
+				tempDir, current.WorktreeBranch, current.MultiRepoWorktrees,
+				newPaths, session.GetWorktreeSettings().SetupTimeout())
+			if res.Err != nil {
+				return sessionRestartedMsg{sessionID: id, err: fmt.Errorf("multi-repo worktree: %w", res.Err)}
+			}
+			for _, w := range res.Warnings {
+				uiLog.Warn("multi_repo_worktree", slog.String("detail", w))
+			}
+			newProjectPath = res.MappedPaths[0]
+			newAdditionalPaths = res.MappedPaths[1:]
+			newWorktrees = res.Worktrees
+
+			// Keep the workspace-feature snapshot in step with the new set.
+			if current.FeatureID != "" {
+				featureRepos := make([]session.FeatureRepo, 0, len(res.Worktrees))
+				for _, wt := range res.Worktrees {
+					featureRepos = append(featureRepos, session.FeatureRepo{
+						RepoName:     filepath.Base(wt.RepoRoot),
+						RepoPath:     wt.RepoRoot,
+						Branch:       wt.Branch,
+						WorktreePath: wt.WorktreePath,
+					})
+				}
+				if _, fErr := session.RegisterWorktreeSessionFeature(statedb.GetGlobal(), current.WorktreeBranch, featureRepos); fErr != nil {
+					uiLog.Warn("feature_register_failed", slog.String("error", fErr.Error()))
+				}
+			}
+		} else {
+			// Non-worktree session: entries are symlinks to live repos by
+			// design. Refresh them.
+			entries, _ := os.ReadDir(tempDir)
+			for _, entry := range entries {
+				_ = os.RemoveAll(filepath.Join(tempDir, entry.Name()))
+			}
+			dirnames := session.DeduplicateDirnames(newPaths)
+			for i, p := range newPaths {
+				linkPath := filepath.Join(tempDir, dirnames[i])
+				_ = os.Symlink(p, linkPath)
+				if i == 0 {
+					newProjectPath = linkPath
+				} else {
+					newAdditionalPaths = append(newAdditionalPaths, linkPath)
+				}
 			}
 		}
 
@@ -8627,6 +8664,9 @@ func (h *Home) applyMultiRepoPathChanges(inst *session.Instance, newPaths []stri
 		h.instancesMu.Lock()
 		current.ProjectPath = newProjectPath
 		current.AdditionalPaths = newAdditionalPaths
+		if current.WorktreeBranch != "" {
+			current.MultiRepoWorktrees = newWorktrees
+		}
 		if current.GetTmuxSession() != nil {
 			current.GetTmuxSession().WorkDir = tempDir
 		}
