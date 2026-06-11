@@ -15537,6 +15537,20 @@ func (h *Home) finishWorktree(inst *session.Instance, sessionID, sessionTitle, b
 			_ = inst.Kill()
 		}
 
+		// Step 5: Keep the workspace-feature table consistent with what just
+		// happened on disk: branch kept → the feature is parked (resumable
+		// via `agent-deck feature resume`); branch deleted → the feature is
+		// finished, drop its row. Docs in the feature dir survive either way.
+		if inst != nil && inst.FeatureID != "" {
+			if db := statedb.GetGlobal(); db != nil {
+				if keepBranch {
+					_ = db.SetFeatureState(inst.FeatureID, session.FeatureStateParked)
+				} else {
+					_ = db.DeleteFeature(inst.FeatureID)
+				}
+			}
+		}
+
 		return worktreeFinishResultMsg{
 			sessionID:    sessionID,
 			sessionTitle: sessionTitle,
