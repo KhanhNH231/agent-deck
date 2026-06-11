@@ -470,3 +470,19 @@ func TestGeneratePathID(t *testing.T) {
 		}
 	})
 }
+
+func TestFeatureWorktreePath(t *testing.T) {
+	got := FeatureWorktreePath("/ws", "feat/login flow", "repo-a")
+	want := filepath.Join("/ws", "feat-login-flow", "worktrees", "repo-a")
+	if got != want {
+		t.Fatalf("got %q want %q", got, want)
+	}
+}
+
+func TestFeatureDir(t *testing.T) {
+	got := FeatureDir("/ws", "feat/login")
+	want := filepath.Join("/ws", "feat-login")
+	if got != want {
+		t.Fatalf("got %q want %q", got, want)
+	}
+}

@@ -130,6 +130,19 @@ func WorktreePath(opts WorktreePathOptions) string {
 	return resolveTemplate(opts.Template, vars)
 }
 
+// FeatureDir returns <root>/<feature-slug>, the directory holding a feature's
+// docs and worktrees under the managed workspace root.
+func FeatureDir(workspaceRoot, feature string) string {
+	return filepath.Join(workspaceRoot, sanitizeBranchForPath(feature))
+}
+
+// FeatureWorktreePath places a worktree under the managed workspace root:
+// <root>/<feature-slug>/worktrees/<repo-name>. The feature name is sanitized
+// with the same rules as branch path components.
+func FeatureWorktreePath(workspaceRoot, feature, repoName string) string {
+	return filepath.Join(FeatureDir(workspaceRoot, feature), "worktrees", repoName)
+}
+
 // GeneratePathID returns an 8-character random hex string for path uniqueness.
 // Used to provide a unique identifier in worktree path templates via {session-id}.
 func GeneratePathID() string {
