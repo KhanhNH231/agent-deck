@@ -13,6 +13,12 @@ import (
 //     (StatusRunning / StatusStarting — activity that may be writing the tree)
 //   - the interval has not elapsed since the last attempt for this feature
 //
+// Error/Stopped/Queued/Waiting/Idle statuses intentionally ALLOW updates:
+// ff-pull only ever touches clean committed state (FastForwardWorktree's
+// dirty-tree gate is the hard safety), and a crashed or stopped session's
+// worktree benefits from being current when the user returns to it. Only
+// Running/Starting indicate an agent actively mutating the tree.
+//
 // An empty statuses slice (no sessions for the feature) is treated as safe:
 // if enabled and the interval has elapsed, the update is allowed.
 func autoUpdateDue(

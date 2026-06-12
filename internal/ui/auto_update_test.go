@@ -84,3 +84,27 @@ func TestAutoUpdateDue_EmptyStatuses_TooSoon(t *testing.T) {
 		t.Error("empty statuses + too soon: want false, got true")
 	}
 }
+
+// TestAutoUpdateDue_NonRunningStatusesAllow: Error/Stopped/Queued sessions do
+// NOT block the update — ff-pull only touches clean committed state and a
+// crashed/stopped session's worktree benefits from being current when the
+// user returns. Only Running/Starting indicate active tree mutation.
+func TestAutoUpdateDue_NonRunningStatusesAllow(t *testing.T) {
+	lastAttempt := t0.Add(-31 * time.Minute)
+	cases := []struct {
+		name   string
+		status session.Status
+	}{
+		{"error", session.StatusError},
+		{"stopped", session.StatusStopped},
+		{"queued", session.StatusQueued},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := autoUpdateDue(true, []session.Status{c.status}, lastAttempt, interval, t0)
+			if !got {
+				t.Errorf("status %s: want due=true when enabled+elapsed, got false", c.status)
+			}
+		})
+	}
+}

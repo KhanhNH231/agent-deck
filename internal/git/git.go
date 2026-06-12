@@ -3,6 +3,7 @@ package git
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -11,9 +12,18 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 )
 
 var consecutiveDashesRe = regexp.MustCompile(`-+`)
+
+// fetchTimeout bounds every remote `git fetch` agent-deck issues. A hung
+// remote (network blackhole, stuck credential prompt) would otherwise block
+// the calling goroutine forever — under E5's unattended background ticks
+// that is a goroutine leak. On timeout the fetch fails and the existing
+// warning/fallthrough paths apply (no new outcomes). Package var (not const)
+// so tests can shrink it.
+var fetchTimeout = 30 * time.Second
 
 // Worktree represents a git worktree
 type Worktree struct {
@@ -793,7 +803,9 @@ func freshOriginDefaultBranchRef(repoDir string) (string, bool) {
 	if err != nil || defaultBranch == "" {
 		return "", false
 	}
-	fetch := exec.Command("git", "-C", repoDir, "fetch", "--quiet", remote, defaultBranch)
+	ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
+	defer cancel()
+	fetch := exec.CommandContext(ctx, "git", "-C", repoDir, "fetch", "--quiet", remote, defaultBranch)
 	if err := fetch.Run(); err != nil {
 		return "", false
 	}
@@ -825,7 +837,9 @@ func fetchRemoteShapedRef(repoDir, ref string) string {
 	if !found {
 		return ""
 	}
-	fetch := exec.Command("git", "-C", repoDir, "fetch", "--quiet", remote, branch)
+	ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
+	defer cancel()
+	fetch := exec.CommandContext(ctx, "git", "-C", repoDir, "fetch", "--quiet", remote, branch)
 	if err := fetch.Run(); err != nil {
 		return fmt.Sprintf("fetch %s %s failed, branching from possibly-stale ref %s", remote, branch, ref)
 	}
