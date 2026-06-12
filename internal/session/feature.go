@@ -195,7 +195,7 @@ func ExtendFeature(db *statedb.StateDB, name, repoName, repoPath, baseRef string
 		return fmt.Errorf("extend %q: %w", name, err)
 	}
 	if baseRef != "" {
-		if _, err := git.CreateWorktreeAtStartPoint(repoRoot, wtPath, branch, baseRef); err != nil {
+		if _, _, err := git.CreateWorktreeAtStartPoint(repoRoot, wtPath, branch, baseRef); err != nil {
 			return fmt.Errorf("extend %q: worktree %s: %w", name, repoName, err)
 		}
 	} else {

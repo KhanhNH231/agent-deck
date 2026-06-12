@@ -59,7 +59,7 @@ func TestMaterializeWipFromParent_ParentUntouched(t *testing.T) {
 	}
 
 	child := parent + "-fork"
-	if _, err := CreateWorktreeAtStartPoint(parent, child, "fork/inv", parentHead); err != nil {
+	if _, _, err := CreateWorktreeAtStartPoint(parent, child, "fork/inv", parentHead); err != nil {
 		t.Fatalf("CreateWorktreeAtStartPoint: %v", err)
 	}
 

@@ -443,26 +443,28 @@ func HeadCommit(repoDir string) (string, error) {
 // start point. Returns createdBranch=true only after git successfully creates
 // the branch for this call. Used by fork-with-state to anchor the new worktree
 // at the parent session's HEAD instead of the invocation repo's HEAD.
-func CreateWorktreeAtStartPoint(repoDir, worktreePath, branchName, startPoint string) (createdBranch bool, err error) {
+// A non-empty warning means the start point's remote fetch failed and the ref may be stale.
+func CreateWorktreeAtStartPoint(repoDir, worktreePath, branchName, startPoint string) (createdBranch bool, warning string, err error) {
 	if err := ValidateBranchName(branchName); err != nil {
-		return false, fmt.Errorf("invalid branch name: %w", err)
+		return false, "", fmt.Errorf("invalid branch name: %w", err)
 	}
 	if strings.TrimSpace(startPoint) == "" {
-		return false, errors.New("start point cannot be empty")
+		return false, "", errors.New("start point cannot be empty")
 	}
 	repoDir = resolveGitInvocationDir(repoDir)
 	if !IsGitRepo(repoDir) {
-		return false, errors.New("not a git repository")
+		return false, "", errors.New("not a git repository")
 	}
 	if BranchExists(repoDir, branchName) {
-		return false, fmt.Errorf("branch %q already exists", branchName)
+		return false, "", fmt.Errorf("branch %q already exists", branchName)
 	}
+	warning = fetchRemoteShapedRef(repoDir, startPoint)
 	cmd := exec.Command("git", "-C", repoDir, "worktree", "add", "-b", branchName, worktreePath, startPoint)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return false, fmt.Errorf("failed to create worktree at start point: %s: %w", strings.TrimSpace(string(output)), err)
+	output, cmdErr := cmd.CombinedOutput()
+	if cmdErr != nil {
+		return false, warning, fmt.Errorf("failed to create worktree at start point: %s: %w", strings.TrimSpace(string(output)), cmdErr)
 	}
-	return true, nil
+	return true, warning, nil
 }
 
 // ListWorktrees returns all worktrees for the repository at repoDir
@@ -790,6 +792,38 @@ func freshOriginDefaultBranchRef(repoDir string) (string, bool) {
 		return "", false
 	}
 	return remote + "/" + defaultBranch, true
+}
+
+// fetchRemoteShapedRef best-effort-fetches ref when it has the shape
+// <remote>/<branch> for a configured remote. Returns "" when the fetch
+// succeeded or ref is not remote-shaped (local branch, SHA, tag); returns a
+// human-readable warning when the fetch failed — callers proceed with the
+// stale ref (offline work must not block; branch-features spec E1).
+func fetchRemoteShapedRef(repoDir, ref string) string {
+	parts := strings.SplitN(ref, "/", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return ""
+	}
+	remote, branch := parts[0], parts[1]
+	remotes, err := listRemotes(repoDir)
+	if err != nil {
+		return ""
+	}
+	found := false
+	for _, r := range remotes {
+		if r == remote {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return ""
+	}
+	fetch := exec.Command("git", "-C", repoDir, "fetch", "--quiet", remote, branch)
+	if err := fetch.Run(); err != nil {
+		return fmt.Sprintf("fetch %s %s failed, branching from possibly-stale ref %s", remote, branch, ref)
+	}
+	return ""
 }
 
 func resolveWorktreeBranch(repoDir, branchName string) (worktreeBranchResolution, error) {

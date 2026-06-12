@@ -97,7 +97,7 @@ func TestForkWithState_BareRepoLayoutLinkedParentWorktree(t *testing.T) {
 
 	// Create the fork worktree anchored at the parent HEAD via the new helper.
 	forkDir := filepath.Join(projectRoot, "fork-wt")
-	createdBranch, err := CreateWorktreeAtStartPoint(baseRoot, forkDir, "fork/bare-layout", parentHeadResolved)
+	createdBranch, _, err := CreateWorktreeAtStartPoint(baseRoot, forkDir, "fork/bare-layout", parentHeadResolved)
 	if err != nil {
 		t.Fatalf("CreateWorktreeAtStartPoint: %v", err)
 	}
@@ -170,7 +170,7 @@ func TestForkWithState_SetupHookObservesMaterializedState(t *testing.T) {
 	// ProcessWorktreeInclude → RunWorktreeSetupAfterCreate.
 	forkDir := filepath.Join(projectRoot, "fork-observation-wt")
 
-	if _, err := CreateWorktreeAtStartPoint(projectRoot, forkDir, "fork/observation", parentHead); err != nil {
+	if _, _, err := CreateWorktreeAtStartPoint(projectRoot, forkDir, "fork/observation", parentHead); err != nil {
 		t.Fatalf("CreateWorktreeAtStartPoint: %v", err)
 	}
 	if err := MaterializeWipFromParent(parentDir, forkDir, false); err != nil {

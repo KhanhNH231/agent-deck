@@ -1298,7 +1298,7 @@ func TestCreateWorktreeAtStartPoint_UsesExplicitParentHead(t *testing.T) {
 	}
 
 	forkWT := filepath.Join(root, "fork-wt")
-	createdBranch, err := CreateWorktreeAtStartPoint(base, forkWT, "fork/from-parent", parentHead)
+	createdBranch, _, err := CreateWorktreeAtStartPoint(base, forkWT, "fork/from-parent", parentHead)
 	if err != nil {
 		t.Fatalf("CreateWorktreeAtStartPoint: %v", err)
 	}
@@ -1354,7 +1354,7 @@ func TestCreateWorktreeAtStartPoint_RejectsExistingBranch(t *testing.T) {
 	parentHead, _ := HeadCommit(base)
 	runGit(t, base, "branch", "fork/existing")
 
-	createdBranch, err := CreateWorktreeAtStartPoint(base, filepath.Join(root, "fork-wt"), "fork/existing", parentHead)
+	createdBranch, _, err := CreateWorktreeAtStartPoint(base, filepath.Join(root, "fork-wt"), "fork/existing", parentHead)
 	if err == nil {
 		t.Fatal("expected existing branch to be rejected")
 	}
