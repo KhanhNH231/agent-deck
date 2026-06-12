@@ -107,8 +107,10 @@ func CreateMultiRepoWorktrees(allPaths []string, parentDir string, branches Mult
 //   - repos dropped from the set have their worktree removed and unregistered
 //     (refused while dirty — force-remove is the caller's explicit decision)
 //
-// On a fatal error only the worktrees newly created by THIS call are rolled
-// back; pre-existing ones are left untouched.
+// Branch keys for added git repos are validated BEFORE any removal, so a
+// missing key aborts with the existing set fully intact. On a fatal error
+// later, only the worktrees newly created by THIS call are rolled back;
+// pre-existing ones are left untouched.
 func ReconcileMultiRepoWorktrees(parentDir string, branches MultiRepoBranches, existing []MultiRepoWorktree, newPaths []string, setupTimeout time.Duration) MultiRepoWorktreeResult {
 	var result MultiRepoWorktreeResult
 
@@ -119,6 +121,22 @@ func ReconcileMultiRepoWorktrees(parentDir string, branches MultiRepoBranches, e
 	keep := make(map[string]bool, len(newPaths))
 	for _, p := range newPaths {
 		keep[p] = true
+	}
+
+	// Validate branch keys for every ADDED git repo up-front, before any
+	// removal — failing mid-reconcile would leave dropped worktrees already
+	// gone with nothing added (inconsistent partial state).
+	for _, p := range newPaths {
+		if _, ok := existingByOriginal[p]; ok {
+			continue
+		}
+		if !git.IsGitRepoOrBareProjectRoot(p) {
+			continue
+		}
+		if branch, ok := branches[p]; !ok || branch == "" {
+			result.Err = fmt.Errorf("no branch specified for repo %s", p)
+			return result
+		}
 	}
 
 	// Remove worktrees for repos dropped from the set first, so their

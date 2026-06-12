@@ -247,6 +247,34 @@ func TestReconcileMultiRepoWorktrees_AddedRepoOnOwnBranch(t *testing.T) {
 	assert.Equal(t, first.Worktrees[0].WorktreePath, res.Worktrees[0].WorktreePath)
 }
 
+func TestReconcileMultiRepoWorktrees_MissingKeyAbortsBeforeRemoval(t *testing.T) {
+	repoA := initFeatureTestRepo(t, "repo-a")
+	repoB := initFeatureTestRepo(t, "repo-b")
+	tempDir, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+
+	// Seed: repoA worktree'd on "feat-a".
+	first := CreateMultiRepoWorktrees([]string{repoA}, tempDir, UniformBranches([]string{repoA}, "feat-a"), time.Minute)
+	require.NoError(t, first.Err)
+	aWorktree := first.Worktrees[0].WorktreePath
+
+	// New set drops repoA and adds repoB — but the branch map lacks repoB.
+	// Validation must fail BEFORE repoA's worktree is removed: a half-applied
+	// reconcile (removed but nothing added) is inconsistent state.
+	branches := MultiRepoBranches{} // repoB missing
+	res := ReconcileMultiRepoWorktrees(tempDir, branches, first.Worktrees, []string{repoB}, time.Minute)
+
+	require.Error(t, res.Err, "expected fatal error for missing branch key")
+	assert.Contains(t, res.Err.Error(), repoB, "error should name the missing repo path")
+
+	// repoA's worktree must be untouched — still on disk and still registered.
+	_, statErr := os.Stat(aWorktree)
+	assert.NoError(t, statErr, "repoA worktree should still exist on disk")
+	out, gitErr := exec.Command("git", "-C", repoA, "worktree", "list").CombinedOutput()
+	require.NoError(t, gitErr, "git worktree list: %s", out)
+	assert.Contains(t, string(out), aWorktree, "repoA worktree should still be registered")
+}
+
 func gitBranchHead(t *testing.T, dir string) string {
 	t.Helper()
 	out, err := exec.Command("git", "-C", dir, "rev-parse", "--abbrev-ref", "HEAD").CombinedOutput()
