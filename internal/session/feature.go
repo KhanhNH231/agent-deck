@@ -200,7 +200,9 @@ func ExtendFeature(db *statedb.StateDB, name, repoName, repoPath, baseRef string
 	if baseRef != "" {
 		_, warn, err = git.CreateWorktreeAtStartPoint(repoRoot, wtPath, branch, baseRef)
 		if err != nil {
-			return "", fmt.Errorf("extend %q: worktree %s: %w", name, repoName, err)
+			// Warning and error coexist: a failed fetch (warning) often explains
+			// why the start point could not be resolved (error). Keep both.
+			return warn, fmt.Errorf("extend %q: worktree %s: %w", name, repoName, err)
 		}
 	} else {
 		if err := git.CreateWorktree(repoRoot, wtPath, branch); err != nil {

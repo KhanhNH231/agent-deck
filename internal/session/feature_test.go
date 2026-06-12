@@ -326,3 +326,29 @@ func TestExtendFeature_UnreachableRemoteWarnsAndProceeds(t *testing.T) {
 		t.Fatalf("repos = %+v err=%v", repos, err)
 	}
 }
+
+// Warning and error coexist legitimately: a typo'd/unfetchable base ref yields
+// BOTH a fetch warning AND a worktree-add error — and the warning explains the
+// error. ExtendFeature must not drop the warning on the error path.
+func TestExtendFeature_WarningSurvivesWorktreeFailure(t *testing.T) {
+	db := openFeatureTestDB(t)
+	_, _, _, _ = startTestFeature(t, db, "login")
+
+	betaRepo := setupRepoWithRemote(t, "beta", "main")
+
+	// Break the remote so fetch fails (offline simulation).
+	cmd := exec.Command("git", "-C", betaRepo, "remote", "set-url", "origin", "/nonexistent/gone.git")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("set-url: %v\n%s", err, out)
+	}
+
+	// Base ref has no local remote-tracking ref: fetch fails (warning), then
+	// worktree-add cannot resolve the start point (error).
+	warning, err := ExtendFeature(db, "login", "beta", betaRepo, "origin/nonexistent-branch")
+	if err == nil {
+		t.Fatal("expected worktree-add error for unresolvable base ref")
+	}
+	if warning == "" {
+		t.Fatal("expected fetch warning to survive the worktree-add error")
+	}
+}
