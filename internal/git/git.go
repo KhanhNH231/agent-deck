@@ -398,11 +398,17 @@ func CreateWorktree(repoDir, worktreePath, branchName string) error {
 	var cmd *exec.Cmd
 	switch resolution.Mode {
 	case worktreeBranchLocal:
-		// Reuse an existing local branch.
+		// Freshen the branch's upstream tracking ref so divergence is visible
+		// immediately (checkout stays at the local tip — ff-pull is E4).
+		if upstream, ok := branchUpstreamRef(repoDir, branchName); ok {
+			_ = fetchRemoteShapedRef(repoDir, upstream)
+		}
 		cmd = exec.Command("git", "-C", repoDir, "worktree", "add", worktreePath, branchName)
 	case worktreeBranchRemote:
-		// Create a local tracking branch from the default remote.
+		// Best-effort freshen (mirrors #973): a stale remote-tracking ref would
+		// root the new local branch at an old tip. Offline falls through.
 		remoteRef := resolution.Remote + "/" + branchName
+		_ = fetchRemoteShapedRef(repoDir, remoteRef)
 		cmd = exec.Command("git", "-C", repoDir, "worktree", "add", "--track", "-b", branchName, worktreePath, remoteRef)
 	default:
 		// Create a new local branch. Regression #973: if an origin remote
@@ -824,6 +830,21 @@ func fetchRemoteShapedRef(repoDir, ref string) string {
 		return fmt.Sprintf("fetch %s %s failed, branching from possibly-stale ref %s", remote, branch, ref)
 	}
 	return ""
+}
+
+// branchUpstreamRef returns the upstream tracking ref (e.g. "origin/main") of
+// a local branch, ok=false when the branch has no upstream configured.
+func branchUpstreamRef(repoDir, branch string) (string, bool) {
+	cmd := exec.Command("git", "-C", repoDir, "rev-parse", "--abbrev-ref", branch+"@{upstream}")
+	output, err := cmd.Output()
+	if err != nil {
+		return "", false
+	}
+	ref := strings.TrimSpace(string(output))
+	if ref == "" {
+		return "", false
+	}
+	return ref, true
 }
 
 func resolveWorktreeBranch(repoDir, branchName string) (worktreeBranchResolution, error) {

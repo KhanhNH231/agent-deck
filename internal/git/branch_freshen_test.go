@@ -195,3 +195,57 @@ func TestCreateWorktreeAtStartPoint_NonRemoteStartPointNoFetchNoWarning(t *testi
 		t.Fatalf("HEAD = %s, want %s", head, sha)
 	}
 }
+
+// TestCreateWorktree_ExistingRemoteBranch_FetchesBeforeTracking verifies that
+// CreateWorktree fetches the remote-tracking ref before creating a local
+// tracking branch, so the new worktree lands on the wire tip, not cloneA's
+// stale cached ref.
+func TestCreateWorktree_ExistingRemoteBranch_FetchesBeforeTracking(t *testing.T) {
+	_, cloneA, cloneB := setupStaleTrackingReposE1(t)
+
+	// Create shared-feat on cloneB and push; let cloneA learn it; then advance
+	// so cloneA's tracking ref is stale.
+	mustGitE1(t, cloneB, "checkout", "-b", "shared-feat")
+	advanceBranchE1(t, cloneB, "shared-feat", "first.txt")
+	mustGitE1(t, cloneA, "fetch", "origin")
+	finalTip := advanceBranchE1(t, cloneB, "shared-feat", "second.txt")
+
+	wt := filepath.Join(t.TempDir(), "wt")
+	if err := CreateWorktree(cloneA, wt, "shared-feat"); err != nil {
+		t.Fatalf("CreateWorktree: %v", err)
+	}
+	head, err := HeadCommit(wt)
+	if err != nil {
+		t.Fatalf("HeadCommit: %v", err)
+	}
+	if head != finalTip {
+		t.Fatalf("tracked stale remote ref: head=%s want %s", head, finalTip)
+	}
+}
+
+// TestCreateWorktree_ExistingLocalBranch_FreshensUpstreamTrackingRef verifies
+// that CreateWorktree fetches the upstream tracking ref of an existing local
+// branch so divergence is visible immediately. The worktree checkout stays at
+// the local tip (ff-pull is E4's job).
+func TestCreateWorktree_ExistingLocalBranch_FreshensUpstreamTrackingRef(t *testing.T) {
+	_, cloneA, cloneB := setupStaleTrackingReposE1(t)
+
+	// Create a local branch tracking origin/main BEFORE advancing origin, so
+	// the local branch roots at the stale tip.
+	mustGitE1(t, cloneA, "branch", "--track", "local-feat", "origin/main")
+
+	// Now advance origin via cloneB — cloneA's tracking ref is now stale.
+	freshTip := advanceBranchE1(t, cloneB, "main", "advance.txt")
+
+	wt := filepath.Join(t.TempDir(), "wt")
+	if err := CreateWorktree(cloneA, wt, "local-feat"); err != nil {
+		t.Fatalf("CreateWorktree: %v", err)
+	}
+
+	// Checkout stays at the local tip, but origin/main must now reflect the
+	// fresh remote tip.
+	got := gitOutputE1(t, cloneA, "rev-parse", "origin/main")
+	if got != freshTip {
+		t.Fatalf("tracking ref still stale: %s want %s", got, freshTip)
+	}
+}
