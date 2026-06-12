@@ -44,8 +44,13 @@ Behavior per tick:
    Account/email: `khanh.nguyen@intrepid.asia`. Token never written to log or stdout.
    Site base URL `https://intrepid-asia.atlassian.net` is a non-secret constant at
    the top of `poll.sh`.
-2. `GET /rest/api/3/search?jql=assignee = currentUser() AND statusCategory != Done`
-   with fields `summary,status,priority,issuetype`.
+2. `GET /rest/api/3/search/jql` (the enhanced endpoint; classic
+   `/rest/api/3/search` was removed by Atlassian in 2025). JQL
+   `assignee = currentUser() AND statusCategory != Done`, fields
+   `summary,status,priority,issuetype`, `maxResults=100`. Token-based
+   pagination via `nextPageToken` / `isLast` (no `total` field anymore); loop
+   while `isLast=false`, **capped at 5 pages** to defend against the known
+   endless-token bug, collecting keys into an in-run Set (dedup within a tick).
 3. **Full-list diff** against `state.json` seen-keys map (`key -> first-seen ts`).
    Not a time-window query — laptop sleep cannot drop an assignment.
 4. New key → append to `inbox.md`:
@@ -99,7 +104,11 @@ leave items unchecked (re-runnable).
 
 - **Two auth surfaces** (Keychain token for poller, MCP session for skill) —
   accepted; MCP expiry fails politely and is re-runnable.
-- JIRA REST `search` pagination: assigned-open issue count is small; cap at
-  `maxResults=100` and log if `total > 100` rather than paginating (YAGNI).
+- JIRA REST pagination: the enhanced `/search/jql` endpoint dropped `total` and
+  uses `nextPageToken`. Assigned-open set is small (one page in practice); loop on
+  `nextPageToken` capped at 5 pages, dedup keys in-run — so the reported
+  endless-token bug cannot spam the inbox.
+- Tooling deps (verified present): `jq`, `terminal-notifier`, `python3`,
+  `security`, `launchctl`. `shellcheck` absent — optional lint, not required.
 - launchd + Keychain: first `security find-generic-password` from a launchd job
   may prompt for Keychain access — approve "Always Allow" once during setup.
