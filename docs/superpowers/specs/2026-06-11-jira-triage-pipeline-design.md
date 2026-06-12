@@ -42,8 +42,8 @@ Behavior per tick:
 
 1. Read token: `security find-generic-password -s jira-poller -w`.
    Account/email: `khanh.nguyen@intrepid.asia`. Token never written to log or stdout.
-   Site base URL (`https://<site>.atlassian.net`) is a non-secret constant at the
-   top of `poll.sh`; confirmed during setup via MCP `getAccessibleAtlassianResources`.
+   Site base URL `https://intrepid-asia.atlassian.net` is a non-secret constant at
+   the top of `poll.sh`.
 2. `GET /rest/api/3/search?jql=assignee = currentUser() AND statusCategory != Done`
    with fields `summary,status,priority,issuetype`.
 3. **Full-list diff** against `state.json` seen-keys map (`key -> first-seen ts`).
