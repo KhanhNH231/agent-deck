@@ -6,7 +6,9 @@ package ui
 // Run with: go test ./internal/ui/ -run TestNewDialog_BranchOverride -race -count=1
 
 import (
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -350,5 +352,156 @@ func TestBranchOverride_LetterKeys_TypeIntoOverrideInput(t *testing.T) {
 	if len(d.multiRepoPaths) != countBefore {
 		t.Errorf("path count changed (%d→%d) while override input was open; letters leaked to shortcuts",
 			countBefore, len(d.multiRepoPaths))
+	}
+}
+
+// ───────── Lifecycle: delete / edit must clean up overrides ──────────────────
+
+// TestBranchOverride_DeletePath_ClearsOverride: deleting a path row with 'd'
+// must drop its override; re-adding the same path must NOT resurrect the old
+// override.
+func TestBranchOverride_DeletePath_ClearsOverride(t *testing.T) {
+	repoA := makeMinimalGitRepo(t)
+	repoB := makeMinimalGitRepo(t)
+	d := dialogWithMultiRepo(t, []string{repoA, repoB})
+
+	// Set an override on repoA (cursor 0) via the 'b' flow.
+	d, _ = d.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
+	if !d.repoOverrideActive {
+		t.Fatal("precondition: override input must open for git repo")
+	}
+	d.repoOverrideInput.SetValue("custom/a")
+	d, _ = d.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if got := d.multiRepoBranchOverrides[repoA]; got != "custom/a" {
+		t.Fatalf("precondition: override = %q, want custom/a", got)
+	}
+
+	// Delete the repoA row (cursor still 0; len > 1 so 'd' is allowed).
+	d, _ = d.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	if len(d.multiRepoPaths) != 1 || d.multiRepoPaths[0] != repoB {
+		t.Fatalf("precondition: delete failed, paths = %v", d.multiRepoPaths)
+	}
+
+	// Re-add the same path.
+	d.multiRepoPaths = append(d.multiRepoPaths, repoA)
+
+	// The old override must NOT resurface in the submit map.
+	branches := d.GetMultiRepoBranches("feature/main", []string{repoB, repoA})
+	if got := branches[repoA]; got != "feature/main" {
+		t.Errorf("re-added path branch = %q, want %q (stale override resurfaced)", got, "feature/main")
+	}
+}
+
+// TestBranchOverride_EditPath_ClearsOldOverride: editing a path in-place must
+// drop the OLD key's override — the new path starts on the main branch.
+func TestBranchOverride_EditPath_ClearsOldOverride(t *testing.T) {
+	repoA := makeMinimalGitRepo(t)
+	repoNew := makeMinimalGitRepo(t)
+	d := dialogWithMultiRepo(t, []string{repoA})
+
+	// Set an override on repoA.
+	d, _ = d.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
+	if !d.repoOverrideActive {
+		t.Fatal("precondition: override input must open for git repo")
+	}
+	d.repoOverrideInput.SetValue("custom/a")
+	d, _ = d.Update(tea.KeyMsg{Type: tea.KeyEnter})
+
+	// Edit row 0 to point at a different repo: Enter starts editing,
+	// replace the path, Enter accepts.
+	d, _ = d.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if !d.multiRepoEditing {
+		t.Fatal("precondition: enter should start path editing")
+	}
+	d.pathInput.SetValue(repoNew)
+	d, _ = d.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if d.multiRepoEditing {
+		t.Fatal("precondition: enter should accept the edit")
+	}
+
+	// Old key's override must be gone.
+	if _, ok := d.multiRepoBranchOverrides[repoA]; ok {
+		t.Error("old path's override must be removed when the path is edited")
+	}
+	// New path gets the main branch (no inherited override).
+	branches := d.GetMultiRepoBranches("feature/main", []string{repoNew})
+	if got := branches[repoNew]; got != "feature/main" {
+		t.Errorf("edited path branch = %q, want %q", got, "feature/main")
+	}
+}
+
+// TestBranchOverride_EditPath_SameValue_KeepsOverride: accepting an edit that
+// leaves the path unchanged must NOT drop the override.
+func TestBranchOverride_EditPath_SameValue_KeepsOverride(t *testing.T) {
+	repoA := makeMinimalGitRepo(t)
+	d := dialogWithMultiRepo(t, []string{repoA})
+
+	d, _ = d.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
+	d.repoOverrideInput.SetValue("custom/a")
+	d, _ = d.Update(tea.KeyMsg{Type: tea.KeyEnter})
+
+	// Start editing and accept without changing the value.
+	d, _ = d.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	d, _ = d.Update(tea.KeyMsg{Type: tea.KeyEnter})
+
+	if got := d.multiRepoBranchOverrides[repoA]; got != "custom/a" {
+		t.Errorf("no-op edit dropped the override: got %q, want custom/a", got)
+	}
+}
+
+// ───────── Keying parity with GetMultiRepoPaths ──────────────────────────────
+
+// TestBranchOverride_MalformedTildePath_KeySurvivesToSubmitMap pins keying
+// parity between the override map and GetMultiRepoPaths (which builds allPaths
+// at the home.go submit site). GetMultiRepoPaths applies a mid-string "~/"
+// repair (textinput suggestion-append artifact, same as GetValues) BEFORE
+// ExpandPath; the override key must be normalized identically or the override
+// silently falls back to the main branch — the silent default the E3 spec bans.
+func TestBranchOverride_MalformedTildePath_KeySurvivesToSubmitMap(t *testing.T) {
+	tempHome := t.TempDir()
+	origHome := os.Getenv("HOME")
+	os.Setenv("HOME", tempHome)
+	defer os.Setenv("HOME", origHome)
+	session.ClearUserConfigCache()
+	defer session.ClearUserConfigCache()
+
+	// Real git repo at ~/repo.
+	repoDir := filepath.Join(tempHome, "repo")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if out, err := exec.Command("git", "-C", repoDir, "init").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	otherRepo := makeMinimalGitRepo(t)
+
+	// Malformed row value: cwd prefix glued to a "~/" path (the artifact
+	// GetMultiRepoPaths repairs via strings.Index(p, "~/") > 0).
+	malformed := "/stale-suggestion-prefix~/repo"
+	d := dialogWithMultiRepo(t, []string{malformed, otherRepo})
+
+	// 'b' on the malformed row must normalize the same way as submit:
+	// detect ~/repo → $HOME/repo → a git repo → input opens.
+	d, _ = d.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
+	if !d.repoOverrideActive {
+		t.Fatalf("override input did not open: keying normalization diverges from GetMultiRepoPaths (validationErr=%q)", d.validationErr)
+	}
+	d.repoOverrideInput.SetValue("custom/tilde")
+	d, _ = d.Update(tea.KeyMsg{Type: tea.KeyEnter})
+
+	// Submit-site simulation: same calls home.go makes.
+	allPaths, enabled := d.GetMultiRepoPaths()
+	if !enabled || len(allPaths) != 2 {
+		t.Fatalf("GetMultiRepoPaths = %v enabled=%v, want 2 paths", allPaths, enabled)
+	}
+	branches := d.GetMultiRepoBranches("feature/main", allPaths)
+
+	expanded := filepath.Join(tempHome, "repo")
+	if got := branches[expanded]; got != "custom/tilde" {
+		t.Errorf("override lost between dialog and submit map: branches[%q] = %q, want custom/tilde (map=%v, overrides=%v)",
+			expanded, got, branches, d.multiRepoBranchOverrides)
+	}
+	if got := branches[otherRepo]; got != "feature/main" {
+		t.Errorf("non-overridden repo = %q, want feature/main", got)
 	}
 }

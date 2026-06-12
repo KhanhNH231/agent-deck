@@ -1097,6 +1097,25 @@ func (d *NewDialog) ToggleMultiRepo() {
 	d.rebuildFocusTargets()
 }
 
+// normalizeRepoPath canonicalizes a raw multi-repo list entry exactly as
+// GetMultiRepoPaths does at submit: trim, strip quotes, repair the malformed
+// mid-string "~/" artifact (textinput suggestion-append, same as GetValues),
+// then expand env vars and the ~ prefix. Branch-override keys MUST use this
+// so they match the allPaths strings built at the home.go submit site —
+// a diverging key silently falls back to the main branch.
+// Returns "" for blank entries.
+func normalizeRepoPath(p string) string {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return ""
+	}
+	p = strings.Trim(p, "'\"")
+	if idx := strings.Index(p, "~/"); idx > 0 {
+		p = p[idx:]
+	}
+	return session.ExpandPath(p)
+}
+
 // GetMultiRepoPaths returns the multi-repo paths and enabled state.
 func (d *NewDialog) GetMultiRepoPaths() ([]string, bool) {
 	if !d.multiRepoEnabled {
@@ -1105,14 +1124,8 @@ func (d *NewDialog) GetMultiRepoPaths() ([]string, bool) {
 	// Return non-empty, expanded paths
 	var paths []string
 	for _, p := range d.multiRepoPaths {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			p = strings.Trim(p, "'\"")
-			if idx := strings.Index(p, "~/"); idx > 0 {
-				p = p[idx:]
-			}
-			p = session.ExpandPath(p)
-			paths = append(paths, p)
+		if normalized := normalizeRepoPath(p); normalized != "" {
+			paths = append(paths, normalized)
 		}
 	}
 	return paths, true
@@ -1967,8 +1980,16 @@ func (d *NewDialog) Update(msg tea.Msg) (*NewDialog, tea.Cmd) {
 			}
 			if cur == focusMultiRepo && d.multiRepoEnabled {
 				if d.multiRepoEditing {
-					// Save the edited path back
-					d.multiRepoPaths[d.multiRepoPathCursor] = strings.TrimSpace(d.pathInput.Value())
+					// Save the edited path back. If the path actually changed,
+					// drop the OLD key's branch override — it belongs to the
+					// repo that is no longer in the list, and keeping it would
+					// orphan the entry (or worse, resurface later).
+					oldKey := normalizeRepoPath(d.multiRepoPaths[d.multiRepoPathCursor])
+					newValue := strings.TrimSpace(d.pathInput.Value())
+					if newKey := normalizeRepoPath(newValue); newKey != oldKey {
+						delete(d.multiRepoBranchOverrides, oldKey)
+					}
+					d.multiRepoPaths[d.multiRepoPathCursor] = newValue
 					d.multiRepoEditing = false
 					d.pathInput.Blur()
 					d.pathCycler.Reset()
@@ -2047,10 +2068,9 @@ func (d *NewDialog) Update(msg tea.Msg) (*NewDialog, tea.Cmd) {
 		case "b":
 			if cur == focusMultiRepo && d.multiRepoEnabled && !d.multiRepoEditing && !d.repoOverrideActive {
 				if d.multiRepoPathCursor < len(d.multiRepoPaths) {
-					path := strings.TrimSpace(d.multiRepoPaths[d.multiRepoPathCursor])
-					if path != "" {
-						path = session.ExpandPath(strings.Trim(path, "'\""))
-					}
+					// normalizeRepoPath keeps the override key identical to the
+					// allPaths strings GetMultiRepoPaths builds at submit.
+					path := normalizeRepoPath(d.multiRepoPaths[d.multiRepoPathCursor])
 					if path == "" || !git.IsGitRepo(path) {
 						d.SetError("branch override only applies to git repos")
 						return d, nil
@@ -2104,6 +2124,10 @@ func (d *NewDialog) Update(msg tea.Msg) (*NewDialog, tea.Cmd) {
 
 		case "d":
 			if cur == focusMultiRepo && d.multiRepoEnabled && !d.multiRepoEditing && !d.repoOverrideActive && len(d.multiRepoPaths) > 1 {
+				// Drop the row's branch override too — re-adding the same path
+				// later must start clean on the main branch, not resurrect a
+				// stale override.
+				delete(d.multiRepoBranchOverrides, normalizeRepoPath(d.multiRepoPaths[d.multiRepoPathCursor]))
 				d.multiRepoPaths = append(d.multiRepoPaths[:d.multiRepoPathCursor], d.multiRepoPaths[d.multiRepoPathCursor+1:]...)
 				if d.multiRepoPathCursor >= len(d.multiRepoPaths) {
 					d.multiRepoPathCursor = len(d.multiRepoPaths) - 1
@@ -2367,8 +2391,7 @@ func (d *NewDialog) View() string {
 		content.WriteString("\n")
 		if pathFocused {
 			overrideSuffix := func(p string) string {
-				expanded := session.ExpandPath(strings.Trim(strings.TrimSpace(p), "'\""))
-				if override, ok := d.multiRepoBranchOverrides[expanded]; ok && override != "" {
+				if override, ok := d.multiRepoBranchOverrides[normalizeRepoPath(p)]; ok && override != "" {
 					return "@" + override
 				}
 				return ""
@@ -2427,8 +2450,7 @@ func (d *NewDialog) View() string {
 					display = "(empty)"
 				}
 				content.WriteString(dimStyle.Render(fmt.Sprintf("    %d. %s", i+1, display)))
-				expanded := session.ExpandPath(strings.Trim(strings.TrimSpace(p), "'\""))
-				if override, ok := d.multiRepoBranchOverrides[expanded]; ok && override != "" {
+				if override, ok := d.multiRepoBranchOverrides[normalizeRepoPath(p)]; ok && override != "" {
 					content.WriteString(overrideSuffixStyle.Render("@" + override))
 				}
 				content.WriteString("\n")
