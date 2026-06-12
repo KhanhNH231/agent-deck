@@ -215,7 +215,7 @@ func TestExtendFeatureAddsRealWorktree(t *testing.T) {
 	_, featureDir, _, _ := startTestFeature(t, db, "login")
 	repoB := initFeatureTestRepo(t, "beta")
 
-	if _, err := ExtendFeature(db, "login", "beta", repoB, ""); err != nil {
+	if _, err := ExtendFeature(db, "login", "beta", repoB, "", "login"); err != nil {
 		t.Fatalf("ExtendFeature: %v", err)
 	}
 
@@ -240,7 +240,7 @@ func TestExtendFeatureAddsRealWorktree(t *testing.T) {
 func TestExtendFeatureRejectsDuplicateRepo(t *testing.T) {
 	db := openFeatureTestDB(t)
 	_, _, repoA, _ := startTestFeature(t, db, "login")
-	if _, err := ExtendFeature(db, "login", "alpha", repoA, ""); err == nil {
+	if _, err := ExtendFeature(db, "login", "alpha", repoA, "", "login"); err == nil {
 		t.Fatal("expected duplicate-repo rejection")
 	}
 }
@@ -302,7 +302,7 @@ func TestExtendFeature_UnreachableRemoteWarnsAndProceeds(t *testing.T) {
 		t.Fatalf("set-url: %v\n%s", err, out)
 	}
 
-	warning, err := ExtendFeature(db, "login", "beta", betaRepo, "origin/main")
+	warning, err := ExtendFeature(db, "login", "beta", betaRepo, "origin/main", "login")
 	if err != nil {
 		t.Fatalf("extend must proceed offline: %v", err)
 	}
@@ -344,11 +344,80 @@ func TestExtendFeature_WarningSurvivesWorktreeFailure(t *testing.T) {
 
 	// Base ref has no local remote-tracking ref: fetch fails (warning), then
 	// worktree-add cannot resolve the start point (error).
-	warning, err := ExtendFeature(db, "login", "beta", betaRepo, "origin/nonexistent-branch")
+	warning, err := ExtendFeature(db, "login", "beta", betaRepo, "origin/nonexistent-branch", "login")
 	if err == nil {
 		t.Fatal("expected worktree-add error for unresolvable base ref")
 	}
 	if warning == "" {
 		t.Fatal("expected fetch warning to survive the worktree-add error")
+	}
+}
+
+// TestExtendFeature_ExplicitBranchDiffersFromFeature: when a branch name that
+// differs from the feature name is passed, the repo row must record that branch
+// and the created worktree must be checked out on it.
+func TestExtendFeature_ExplicitBranchDiffersFromFeature(t *testing.T) {
+	db := openFeatureTestDB(t)
+	_, featureDir, _, _ := startTestFeature(t, db, "login")
+	repoB := initFeatureTestRepo(t, "beta")
+
+	const explicitBranch = "feat/other-line"
+	if _, err := ExtendFeature(db, "login", "beta", repoB, "", explicitBranch); err != nil {
+		t.Fatalf("ExtendFeature: %v", err)
+	}
+
+	_, repos, err := db.GetFeatureByName("login")
+	if err != nil {
+		t.Fatalf("GetFeatureByName: %v", err)
+	}
+	var betaRow *statedb.FeatureRepoRow
+	for i := range repos {
+		if repos[i].RepoName == "beta" {
+			betaRow = &repos[i]
+		}
+	}
+	if betaRow == nil {
+		t.Fatal("beta repo row not found")
+	}
+	if betaRow.Branch != explicitBranch {
+		t.Fatalf("feature_repos.Branch = %q, want %q", betaRow.Branch, explicitBranch)
+	}
+
+	wtB := filepath.Join(featureDir, "worktrees", "beta")
+	out, err := exec.Command("git", "-C", wtB, "rev-parse", "--abbrev-ref", "HEAD").Output()
+	if err != nil {
+		t.Fatalf("rev-parse HEAD in worktree: %v", err)
+	}
+	if got := strings.TrimSpace(string(out)); got != explicitBranch {
+		t.Fatalf("worktree HEAD = %q, want %q", got, explicitBranch)
+	}
+}
+
+// TestExtendFeature_EmptyBranchRejected: passing an empty branch to
+// ExtendFeature must return an error immediately; no worktree created, no row
+// added to the DB.
+func TestExtendFeature_EmptyBranchRejected(t *testing.T) {
+	db := openFeatureTestDB(t)
+	_, featureDir, _, _ := startTestFeature(t, db, "login")
+	repoB := initFeatureTestRepo(t, "beta")
+
+	_, err := ExtendFeature(db, "login", "beta", repoB, "", "")
+	if err == nil {
+		t.Fatal("expected error for empty branch")
+	}
+
+	// No worktree should have been created.
+	wtB := filepath.Join(featureDir, "worktrees", "beta")
+	if _, statErr := os.Stat(wtB); !os.IsNotExist(statErr) {
+		t.Fatalf("worktree must not exist after empty-branch rejection, stat err = %v", statErr)
+	}
+
+	// No new repo row should have been added.
+	_, repos, err2 := db.GetFeatureByName("login")
+	if err2 != nil {
+		t.Fatalf("GetFeatureByName: %v", err2)
+	}
+	if len(repos) != 1 {
+		t.Fatalf("expected 1 repo row after rejection, got %d", len(repos))
 	}
 }

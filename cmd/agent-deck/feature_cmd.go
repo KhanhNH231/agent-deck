@@ -100,21 +100,33 @@ func handleFeature(profile string, args []string) {
 		_ = fs.Parse(args[1:])
 		name, repoArg := fs.Arg(0), fs.Arg(1)
 		if name == "" || repoArg == "" {
-			fmt.Fprintln(os.Stderr, "Usage: agent-deck feature extend <name> <repo> [--base ref]\n  <repo> is a [[repos]] manifest name or a path to a git repo")
+			fmt.Fprintln(os.Stderr, "Usage: agent-deck feature extend <name> <repo>[@branch] [--base ref]\n  <repo> is a [[repos]] manifest name or a path to a git repo\n  @branch puts the new worktree on a specific branch (branch may contain \"/\")")
 			os.Exit(1)
 		}
-		repoName, repoPath, baseRef := repoArg, repoArg, *base
-		if def, ok := session.FindManifestRepo(repoArg); ok {
+		rawRepo, branchArg := splitRepoBranch(repoArg)
+		repoName, repoPath, baseRef := rawRepo, rawRepo, *base
+		if def, ok := session.FindManifestRepo(rawRepo); ok {
 			repoPath = def.PathExpanded()
 			if baseRef == "" {
 				baseRef = def.DefaultBase
 			}
 		} else {
-			repoName = filepath.Base(repoArg)
+			repoName = filepath.Base(rawRepo)
 		}
 		db := openDB()
 		defer db.Close()
-		warning, err := session.ExtendFeature(db, name, repoName, repoPath, baseRef)
+		branch := branchArg
+		if branch == "" {
+			// No explicit branch in the CLI arg: derive from the feature's
+			// existing repos so the default is visible at the call site.
+			_, repos, err := db.GetFeatureByName(name)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			branch = session.DefaultFeatureBranch(repos, name)
+		}
+		warning, err := session.ExtendFeature(db, name, repoName, repoPath, baseRef, branch)
 		// Print the warning before any error: a failed fetch often explains
 		// why the extend itself failed.
 		if warning != "" {
@@ -124,7 +136,7 @@ func handleFeature(profile string, args []string) {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("Extended %q with %s. Restart the feature's session(s) to pick up the new repo.\n", name, repoName)
+		fmt.Printf("Extended %q with %s on branch %s. Restart the feature's session(s) to pick up the new repo.\n", name, repoName, branch)
 
 	case "delete", "rm":
 		name := ""
@@ -186,14 +198,34 @@ func printFeatureHelp() {
 	fmt.Print(`Workspace features — park/resume units of work under [workspace].root
 
 Usage:
-  agent-deck feature list                 List features and their state
-  agent-deck feature park <name> [--force]   Remove worktrees, keep docs+branches
-  agent-deck feature resume <name>        Recreate worktrees from branches
-  agent-deck feature extend <name> <repo> [--base ref]   Add a repo (manifest name or path)
-  agent-deck feature conductor <name>     Scaffold contracts/+briefs and set up conductor-<name>
-  agent-deck feature delete <name>        Park + remove feature dir (branches kept)
+  agent-deck feature list                           List features and their state
+  agent-deck feature park <name> [--force]          Remove worktrees, keep docs+branches
+  agent-deck feature resume <name>                  Recreate worktrees from branches
+  agent-deck feature extend <name> <repo>[@branch] [--base ref]
+                                                    Add a repo (manifest name or path).
+                                                    @branch puts the new worktree on a specific
+                                                    branch (may contain "/", e.g. feat/x).
+                                                    Without @branch the feature's existing branch
+                                                    is used as the default.
+                                                    Note: repo paths containing "@" must use the
+                                                    explicit @branch suffix to disambiguate.
+  agent-deck feature conductor <name>               Scaffold contracts/+briefs and set up conductor-<name>
+  agent-deck feature delete <name>                  Park + remove feature dir (branches kept)
 
 Features are registered automatically when a worktree session is created
 while [workspace].root is set in ~/.agent-deck/config.toml.
 `)
+}
+
+// splitRepoBranch splits "repo@branch". repo may be a path; branch may
+// contain "/" (feat/x). Split on the FIRST "@" only; no "@" → branch "".
+// Limitation (documented in help): repo paths containing "@" need the
+// explicit @branch suffix to disambiguate (first "@" is treated as the
+// separator, so "we@ird/path@feat/x" yields repo="we", branch="ird/path@feat/x").
+func splitRepoBranch(arg string) (repo, branch string) {
+	idx := strings.Index(arg, "@")
+	if idx < 0 {
+		return arg, ""
+	}
+	return arg[:idx], arg[idx+1:]
 }

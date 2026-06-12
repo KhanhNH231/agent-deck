@@ -164,13 +164,30 @@ func ResumeFeature(db *statedb.StateDB, name string) error {
 	return db.SetFeatureState(f.ID, FeatureStateActive)
 }
 
+// DefaultFeatureBranch returns the branch that a new repo should be put on
+// when no explicit branch is supplied by the caller. It uses the first repo's
+// non-empty branch; when there are no repos yet (or the first has an empty
+// branch) it falls back to the feature name. Used by call sites to compute
+// the visible default before passing it to ExtendFeature.
+func DefaultFeatureBranch(repos []statedb.FeatureRepoRow, name string) string {
+	if len(repos) > 0 && repos[0].Branch != "" {
+		return repos[0].Branch
+	}
+	return name
+}
+
 // ExtendFeature adds a repo to an existing feature: creates a REAL worktree
-// for it under <feature-root>/worktrees/<repoName> on the feature's branch
+// for it under <feature-root>/worktrees/<repoName> on the given branch
 // (created from baseRef when given, e.g. "origin/master") and appends the
 // repo to the feature's snapshot. Fails loudly; never symlinks a live repo.
 // Returns a non-empty warning when the remote was unreachable during fetch
 // (offline degradation: worktree still created from stale tracking ref).
-func ExtendFeature(db *statedb.StateDB, name, repoName, repoPath, baseRef string) (warning string, err error) {
+// branch must not be empty — callers should compute it via DefaultFeatureBranch
+// when the user has not supplied an explicit value.
+func ExtendFeature(db *statedb.StateDB, name, repoName, repoPath, baseRef, branch string) (warning string, err error) {
+	if branch == "" {
+		return "", errors.New("branch must not be empty")
+	}
 	f, repos, err := db.GetFeatureByName(name)
 	if err != nil {
 		return "", fmt.Errorf("extend: %w", err)
@@ -179,10 +196,6 @@ func ExtendFeature(db *statedb.StateDB, name, repoName, repoPath, baseRef string
 		if r.RepoName == repoName || r.RepoPath == repoPath {
 			return "", fmt.Errorf("extend %q: repo %s already part of the feature", name, repoName)
 		}
-	}
-	branch := name
-	if len(repos) > 0 && repos[0].Branch != "" {
-		branch = repos[0].Branch
 	}
 	if !git.IsGitRepoOrBareProjectRoot(repoPath) {
 		return "", fmt.Errorf("extend %q: %s is not a git repository", name, repoPath)
