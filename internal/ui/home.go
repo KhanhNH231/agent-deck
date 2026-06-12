@@ -864,6 +864,14 @@ type worktreeDirtyCheckMsg struct {
 	err       error
 }
 
+// featureUpdateResultMsg is sent when the async ff-pull update for a feature completes.
+type featureUpdateResultMsg struct {
+	sessionID   string
+	featureName string
+	updates     []session.FeatureRepoUpdate
+	err         error
+}
+
 // worktreeFinishResultMsg is sent when the worktree finish operation completes
 type worktreeFinishResultMsg struct {
 	sessionID    string
@@ -5210,6 +5218,26 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
+	case featureUpdateResultMsg:
+		if msg.err != nil {
+			h.setError(msg.err)
+			return h, nil
+		}
+		var updated, upToDate, skipped int
+		for _, u := range msg.updates {
+			switch u.Result.Outcome {
+			case git.FFUpdated:
+				updated++
+			case git.FFUpToDate:
+				upToDate++
+			default:
+				skipped++
+			}
+		}
+		h.setError(fmt.Errorf("feature %s: %d updated, %d skipped, %d up-to-date",
+			msg.featureName, updated, skipped, upToDate))
+		return h, nil
+
 	case worktreeFinishResultMsg:
 		if msg.err != nil {
 			// Show error in dialog (user can go back or cancel)
@@ -6476,11 +6504,42 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "U":
 		// Dismiss the >5-releases-behind update nudge for this session.
 		// Only meaningful when the nudge is actually showing — otherwise
-		// fall through so other "U"-bound paths can handle it.
+		// fall through to the feature update path below.
 		if h.shouldRenderUpdateNudge() {
 			h.handleUpdateNudgeDismiss(msg)
 			return h, nil
 		}
+		// ff-pull update for a feature session (E4).
+		if h.cursor < len(h.flatItems) {
+			item := h.flatItems[h.cursor]
+			if item.Type == session.ItemTypeSession && item.Session != nil {
+				inst := item.Session
+				if inst.WorktreeBranch == "" {
+					h.setError(fmt.Errorf("no feature for this session"))
+					return h, nil
+				}
+				featureName := inst.WorktreeBranch
+				sid := inst.ID
+				return h, func() tea.Msg {
+					db := statedb.GetGlobal()
+					if db == nil {
+						return featureUpdateResultMsg{
+							sessionID:   sid,
+							featureName: featureName,
+							err:         fmt.Errorf("state db unavailable"),
+						}
+					}
+					updates, err := session.UpdateFeature(db, featureName)
+					return featureUpdateResultMsg{
+						sessionID:   sid,
+						featureName: featureName,
+						updates:     updates,
+						err:         err,
+					}
+				}
+			}
+		}
+		return h, nil
 
 	case "esc":
 		// Dismiss maintenance banner if visible
@@ -13978,6 +14037,13 @@ func (h *Home) renderPreviewPane(width, height int) string {
 			b.WriteString(wtHintStyle.Render("Finish:  "))
 			b.WriteString(wtKeyStyle.Render(finishKey))
 			b.WriteString(wtHintStyle.Render(" merge + cleanup"))
+			b.WriteString("\n")
+		}
+		// Feature update hint (ff-pull)
+		if updateKey := h.actionKey(hotkeyWorktreeFeatureUpdate); updateKey != "" {
+			b.WriteString(wtHintStyle.Render("Update:  "))
+			b.WriteString(wtKeyStyle.Render(updateKey))
+			b.WriteString(wtHintStyle.Render(" ff-pull feature repos"))
 			b.WriteString("\n")
 		}
 	}
