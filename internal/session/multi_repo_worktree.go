@@ -10,6 +10,21 @@ import (
 	"github.com/asheshgoplani/agent-deck/internal/git"
 )
 
+// MultiRepoBranches maps each original repo path to the branch its worktree
+// should be on. Every git-repo path MUST have an entry — a missing or empty
+// key is a programming error and fails the whole operation (no silent default).
+type MultiRepoBranches map[string]string
+
+// UniformBranches builds a MultiRepoBranches putting every path on the same
+// branch — the single-branch fast path used by the TUI default flow.
+func UniformBranches(paths []string, branch string) MultiRepoBranches {
+	m := make(MultiRepoBranches, len(paths))
+	for _, p := range paths {
+		m[p] = branch
+	}
+	return m
+}
+
 type MultiRepoWorktreeResult struct {
 	MappedPaths []string
 	Worktrees   []MultiRepoWorktree
@@ -21,7 +36,12 @@ type MultiRepoWorktreeResult struct {
 	Err error
 }
 
-func CreateMultiRepoWorktrees(allPaths []string, parentDir string, branch string, setupTimeout time.Duration) MultiRepoWorktreeResult {
+// CreateMultiRepoWorktrees creates worktrees for all git repos in allPaths,
+// placing them under parentDir. Each git-repo path must have an entry in
+// branches; a missing or empty entry is fatal (fail-loud, no silent default).
+// Non-git paths are symlinked (live view). On any fatal error all worktrees
+// created so far are rolled back.
+func CreateMultiRepoWorktrees(allPaths []string, parentDir string, branches MultiRepoBranches, setupTimeout time.Duration) MultiRepoWorktreeResult {
 	var result MultiRepoWorktreeResult
 	dirnames := DeduplicateDirnames(allPaths)
 
@@ -29,6 +49,14 @@ func CreateMultiRepoWorktrees(allPaths []string, parentDir string, branch string
 		wtPath := filepath.Join(parentDir, dirnames[i])
 
 		if git.IsGitRepoOrBareProjectRoot(p) {
+			// Fail loud when the caller hasn't specified a branch for this repo.
+			branch, ok := branches[p]
+			if !ok || branch == "" {
+				result.Err = fmt.Errorf("no branch specified for repo %s", p)
+				rollbackMultiRepoWorktrees(result.Worktrees)
+				return result
+			}
+
 			// A git repo MUST get a real, isolated worktree. Failure here is
 			// fatal: silently symlinking the live checkout would let the agent's
 			// edits flow straight into the main repo while the session looks
@@ -72,16 +100,16 @@ func CreateMultiRepoWorktrees(allPaths []string, parentDir string, branch string
 // ReconcileMultiRepoWorktrees brings a worktree session's repo set in line
 // with newPaths without touching surviving worktrees (uncommitted work in
 // them is preserved):
-//   - paths that already have a worktree keep it as-is
-//   - added git repos get a REAL worktree (fail-loud, like creation — never a
-//     live-repo symlink)
+//   - paths that already have a worktree keep it as-is (no branch lookup needed)
+//   - added git repos get a REAL worktree on the branch from branches (fail-loud
+//     on missing or empty key — never a live-repo symlink)
 //   - added non-git dirs are symlinked (live view, matching creation)
 //   - repos dropped from the set have their worktree removed and unregistered
 //     (refused while dirty — force-remove is the caller's explicit decision)
 //
 // On a fatal error only the worktrees newly created by THIS call are rolled
 // back; pre-existing ones are left untouched.
-func ReconcileMultiRepoWorktrees(parentDir, branch string, existing []MultiRepoWorktree, newPaths []string, setupTimeout time.Duration) MultiRepoWorktreeResult {
+func ReconcileMultiRepoWorktrees(parentDir string, branches MultiRepoBranches, existing []MultiRepoWorktree, newPaths []string, setupTimeout time.Duration) MultiRepoWorktreeResult {
 	var result MultiRepoWorktreeResult
 
 	existingByOriginal := make(map[string]MultiRepoWorktree, len(existing))
@@ -117,6 +145,14 @@ func ReconcileMultiRepoWorktrees(parentDir, branch string, existing []MultiRepoW
 		wtPath := filepath.Join(parentDir, dirnames[i])
 
 		if git.IsGitRepoOrBareProjectRoot(p) {
+			// Fail loud on missing or empty branch for newly-added git repos.
+			branch, ok := branches[p]
+			if !ok || branch == "" {
+				result.Err = fmt.Errorf("no branch specified for repo %s", p)
+				rollbackMultiRepoWorktrees(created)
+				return result
+			}
+
 			repoRoot, rootErr := git.GetWorktreeBaseRoot(p)
 			if rootErr != nil {
 				result.Err = fmt.Errorf("cannot isolate %s: resolve repo root: %w", p, rootErr)

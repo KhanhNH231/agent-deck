@@ -8613,7 +8613,7 @@ func (h *Home) applyMultiRepoPathChanges(inst *session.Instance, newPaths []stri
 			// symlink), and unregisters dropped ones. Same fail-loud rule as
 			// session creation.
 			res := session.ReconcileMultiRepoWorktrees(
-				tempDir, current.WorktreeBranch, current.MultiRepoWorktrees,
+				tempDir, session.UniformBranches(newPaths, current.WorktreeBranch), current.MultiRepoWorktrees,
 				newPaths, session.GetWorktreeSettings().SetupTimeout())
 			if res.Err != nil {
 				return sessionRestartedMsg{sessionID: id, err: fmt.Errorf("multi-repo worktree: %w", res.Err)}
@@ -9271,7 +9271,7 @@ func (h *Home) createSessionInGroupWithWorktreeAndOptions(
 				}
 				inst.MultiRepoTempDir = parentDir
 
-				wtResult := session.CreateMultiRepoWorktrees(allPaths, parentDir, worktreeBranch, session.GetWorktreeSettings().SetupTimeout())
+				wtResult := session.CreateMultiRepoWorktrees(allPaths, parentDir, session.UniformBranches(allPaths, worktreeBranch), session.GetWorktreeSettings().SetupTimeout())
 				if wtResult.Err != nil {
 					// A git repo could not be isolated. Abort rather than launch a
 					// session that silently aliases the live repo. Worktrees already

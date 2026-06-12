@@ -24,7 +24,7 @@ func TestReconcileAddsRealWorktreeNotSymlink(t *testing.T) {
 	tempDir := t.TempDir()
 
 	// Existing state: repo-a already has a worktree for the branch.
-	first := CreateMultiRepoWorktrees([]string{repoA}, tempDir, "feat-x", time.Minute)
+	first := CreateMultiRepoWorktrees([]string{repoA}, tempDir, UniformBranches([]string{repoA}, "feat-x"), time.Minute)
 	if first.Err != nil {
 		t.Fatalf("seed worktree: %v", first.Err)
 	}
@@ -34,7 +34,7 @@ func TestReconcileAddsRealWorktreeNotSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res := ReconcileMultiRepoWorktrees(tempDir, "feat-x", first.Worktrees, []string{repoA, repoB}, time.Minute)
+	res := ReconcileMultiRepoWorktrees(tempDir, UniformBranches([]string{repoA, repoB}, "feat-x"), first.Worktrees, []string{repoA, repoB}, time.Minute)
 	if res.Err != nil {
 		t.Fatalf("reconcile: %v", res.Err)
 	}
@@ -72,12 +72,12 @@ func TestReconcileRemovesDroppedRepoWorktree(t *testing.T) {
 	repoB := initFeatureTestRepo(t, "repo-b")
 	tempDir := t.TempDir()
 
-	first := CreateMultiRepoWorktrees([]string{repoA, repoB}, tempDir, "feat-x", time.Minute)
+	first := CreateMultiRepoWorktrees([]string{repoA, repoB}, tempDir, UniformBranches([]string{repoA, repoB}, "feat-x"), time.Minute)
 	if first.Err != nil {
 		t.Fatalf("seed: %v", first.Err)
 	}
 
-	res := ReconcileMultiRepoWorktrees(tempDir, "feat-x", first.Worktrees, []string{repoA}, time.Minute)
+	res := ReconcileMultiRepoWorktrees(tempDir, UniformBranches([]string{repoA}, "feat-x"), first.Worktrees, []string{repoA}, time.Minute)
 	if res.Err != nil {
 		t.Fatalf("reconcile: %v", res.Err)
 	}
@@ -94,12 +94,12 @@ func TestReconcileSymlinksNonGitDirs(t *testing.T) {
 	docs := t.TempDir()
 	tempDir := t.TempDir()
 
-	first := CreateMultiRepoWorktrees([]string{repoA}, tempDir, "feat-x", time.Minute)
+	first := CreateMultiRepoWorktrees([]string{repoA}, tempDir, UniformBranches([]string{repoA}, "feat-x"), time.Minute)
 	if first.Err != nil {
 		t.Fatalf("seed: %v", first.Err)
 	}
 
-	res := ReconcileMultiRepoWorktrees(tempDir, "feat-x", first.Worktrees, []string{repoA, docs}, time.Minute)
+	res := ReconcileMultiRepoWorktrees(tempDir, UniformBranches([]string{repoA}, "feat-x"), first.Worktrees, []string{repoA, docs}, time.Minute)
 	if res.Err != nil {
 		t.Fatalf("reconcile: %v", res.Err)
 	}
