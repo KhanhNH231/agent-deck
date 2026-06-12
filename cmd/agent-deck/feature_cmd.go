@@ -155,6 +155,33 @@ func handleFeature(profile string, args []string) {
 		}
 		fmt.Printf("Deleted %q — feature dir removed; branches kept in their repos.\n", name)
 
+	case "update":
+		name := ""
+		if len(args) > 1 {
+			name = args[1]
+		}
+		if name == "" {
+			fmt.Fprintln(os.Stderr, "Usage: agent-deck feature update <name>")
+			os.Exit(1)
+		}
+		db := openDB()
+		defer db.Close()
+		updates, err := session.UpdateFeature(db, name)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+		fmt.Fprintln(w, "REPO\tOUTCOME\tCHANGE\tDETAIL")
+		for _, u := range updates {
+			change := "-"
+			if u.Result.OldTip != "" && u.Result.NewTip != "" {
+				change = u.Result.OldTip + ".." + u.Result.NewTip
+			}
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", u.RepoName, u.Result.Outcome, change, u.Result.Detail)
+		}
+		w.Flush()
+
 	case "conductor":
 		name := ""
 		if len(args) > 1 {
@@ -201,6 +228,9 @@ Usage:
   agent-deck feature list                           List features and their state
   agent-deck feature park <name> [--force]          Remove worktrees, keep docs+branches
   agent-deck feature resume <name>                  Recreate worktrees from branches
+  agent-deck feature update <name>                  Fetch + fast-forward every repo in the feature
+                                                    (ff-only, clean-worktree gated; skips reported
+                                                    as outcomes, not errors)
   agent-deck feature extend <name> <repo>[@branch] [--base ref]
                                                     Add a repo (manifest name or path).
                                                     @branch puts the new worktree on a specific

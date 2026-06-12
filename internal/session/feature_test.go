@@ -422,6 +422,221 @@ func TestExtendFeature_EmptyBranchRejected(t *testing.T) {
 	}
 }
 
+// ── UpdateFeature tests ────────────────────────────────────────────────────
+
+// setupRepoWithRemoteAndWorktree sets up a repo with a real upstream and
+// creates a worktree at wtPath on a feature branch derived from "main".
+// The feature branch has the same initial commit as main and is pushed to
+// origin, so it has a remote-tracking ref. Returns (cloneDir).
+// When behindByOne is true, a second commit is pushed to origin/<featureBranch>
+// so the clone's worktree is 1 behind — the file "remote_change.txt" appears
+// in the worktree after an update.
+func setupRepoWithRemoteAndWorktree(t *testing.T, repoName, featureBranch, wtPath string, behindByOne bool) string {
+	t.Helper()
+	// setupRepoWithRemote seeds a clone on "main" with one commit + origin.
+	cloneDir := setupRepoWithRemote(t, repoName, "main")
+
+	mustGit := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, cmdErr := cmd.CombinedOutput(); cmdErr != nil {
+			t.Fatalf("git %v in %s: %v\n%s", args, dir, cmdErr, out)
+		}
+	}
+
+	// Create and push featureBranch from the current HEAD.
+	mustGit(cloneDir, "checkout", "-b", featureBranch)
+	mustGit(cloneDir, "push", "-u", "origin", featureBranch)
+	// Return to main so featureBranch can be put in a worktree.
+	mustGit(cloneDir, "checkout", "main")
+
+	if behindByOne {
+		// Push an extra commit to origin/<featureBranch> via a second clone.
+		originURL, err := exec.Command("git", "-C", cloneDir, "remote", "get-url", "origin").Output()
+		if err != nil {
+			t.Fatalf("get origin url: %v", err)
+		}
+		tmp, err := filepath.EvalSymlinks(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		clone2 := filepath.Join(tmp, "clone2")
+		mustGit2 := func(dir string, args ...string) {
+			t.Helper()
+			cmd := exec.Command("git", args...)
+			cmd.Dir = dir
+			if out, cmdErr := cmd.CombinedOutput(); cmdErr != nil {
+				t.Fatalf("git %v in %s: %v\n%s", args, dir, cmdErr, out)
+			}
+		}
+		mustGit2(tmp, "clone", strings.TrimSpace(string(originURL)), "clone2")
+		mustGit2(clone2, "config", "user.email", "t@t")
+		mustGit2(clone2, "config", "user.name", "t")
+		mustGit2(clone2, "checkout", featureBranch)
+		if err := os.WriteFile(filepath.Join(clone2, "remote_change.txt"), []byte("from remote"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		mustGit2(clone2, "add", ".")
+		mustGit2(clone2, "commit", "-m", "remote commit")
+		mustGit2(clone2, "push", "origin", featureBranch)
+	}
+
+	// Create the worktree at wtPath from cloneDir on featureBranch.
+	if err := os.MkdirAll(filepath.Dir(wtPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-C", cloneDir, "worktree", "add", wtPath, featureBranch).CombinedOutput(); err != nil {
+		t.Fatalf("worktree add: %v\n%s", err, out)
+	}
+	return cloneDir
+}
+
+// TestUpdateFeature_MixedOutcomes: feature with 2 repos — repoA behind
+// upstream (→ FFUpdated; file from remote materialises in worktree), repoB
+// up-to-date (→ FFUpToDate). No error returned.
+func TestUpdateFeature_MixedOutcomes(t *testing.T) {
+	db := openFeatureTestDB(t)
+
+	wsRoot, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const featureName = "mixed-update"
+	const featureBranch = "feat/mixed-update"
+
+	featureDir := git.FeatureDir(wsRoot, featureName)
+	wtA := git.FeatureWorktreePath(wsRoot, featureName, "repo-a")
+	wtB := git.FeatureWorktreePath(wsRoot, featureName, "repo-b")
+
+	// repoA is 1 commit behind its origin on featureBranch.
+	repoA := setupRepoWithRemoteAndWorktree(t, "repo-a", featureBranch, wtA, true)
+	// repoB is up-to-date (same commit as origin) on featureBranch.
+	repoB := setupRepoWithRemoteAndWorktree(t, "repo-b", featureBranch, wtB, false)
+
+	_, err = RegisterFeature(db, featureName, featureDir, false, []FeatureRepo{
+		{RepoName: "repo-a", RepoPath: repoA, Branch: featureBranch, WorktreePath: wtA},
+		{RepoName: "repo-b", RepoPath: repoB, Branch: featureBranch, WorktreePath: wtB},
+	})
+	if err != nil {
+		t.Fatalf("RegisterFeature: %v", err)
+	}
+
+	updates, err := UpdateFeature(db, featureName)
+	if err != nil {
+		t.Fatalf("UpdateFeature: %v", err)
+	}
+	if len(updates) != 2 {
+		t.Fatalf("expected 2 updates, got %d", len(updates))
+	}
+
+	byRepo := make(map[string]FeatureRepoUpdate, 2)
+	for _, u := range updates {
+		byRepo[u.RepoName] = u
+	}
+
+	// repoA must be updated.
+	a := byRepo["repo-a"]
+	if a.Result.Outcome != git.FFUpdated {
+		t.Fatalf("repo-a: expected FFUpdated, got %q (detail: %s)", a.Result.Outcome, a.Result.Detail)
+	}
+	if a.Result.OldTip == "" || a.Result.NewTip == "" {
+		t.Fatalf("repo-a: expected OldTip/NewTip set, got %q/%q", a.Result.OldTip, a.Result.NewTip)
+	}
+	// The remote commit's file must materialise in the worktree.
+	if _, err := os.Stat(filepath.Join(wtA, "remote_change.txt")); err != nil {
+		t.Fatalf("remote_change.txt not present in updated worktree: %v", err)
+	}
+
+	// repoB must be up-to-date.
+	b := byRepo["repo-b"]
+	if b.Result.Outcome != git.FFUpToDate {
+		t.Fatalf("repo-b: expected FFUpToDate, got %q (detail: %s)", b.Result.Outcome, b.Result.Detail)
+	}
+}
+
+// TestUpdateFeature_ParkedErrors: parked feature → error mentioning "parked".
+func TestUpdateFeature_ParkedErrors(t *testing.T) {
+	db := openFeatureTestDB(t)
+	_, _, _, _ = startTestFeature(t, db, "login")
+
+	if err := ParkFeature(db, "login", false); err != nil {
+		t.Fatalf("ParkFeature: %v", err)
+	}
+
+	_, err := UpdateFeature(db, "login")
+	if err == nil {
+		t.Fatal("expected error for parked feature")
+	}
+	if !strings.Contains(err.Error(), "parked") {
+		t.Fatalf("error must mention 'parked', got: %v", err)
+	}
+}
+
+// TestUpdateFeature_MissingWorktreeReported: a feature whose WorktreePath was
+// deleted from disk → FFMissing outcome for that repo, other repos still
+// processed (no error returned).
+func TestUpdateFeature_MissingWorktreeReported(t *testing.T) {
+	db := openFeatureTestDB(t)
+
+	wsRoot, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const featureName = "missing-wt"
+	const featureBranch = "feat/missing-wt"
+
+	featureDir := git.FeatureDir(wsRoot, featureName)
+	wtA := git.FeatureWorktreePath(wsRoot, featureName, "repo-a")
+	wtB := git.FeatureWorktreePath(wsRoot, featureName, "repo-b")
+
+	// Both repos up-to-date; we will manually delete wtA afterwards.
+	repoA := setupRepoWithRemoteAndWorktree(t, "repo-a", featureBranch, wtA, false)
+	repoB := setupRepoWithRemoteAndWorktree(t, "repo-b", featureBranch, wtB, false)
+
+	_, err = RegisterFeature(db, featureName, featureDir, false, []FeatureRepo{
+		{RepoName: "repo-a", RepoPath: repoA, Branch: featureBranch, WorktreePath: wtA},
+		{RepoName: "repo-b", RepoPath: repoB, Branch: featureBranch, WorktreePath: wtB},
+	})
+	if err != nil {
+		t.Fatalf("RegisterFeature: %v", err)
+	}
+
+	// Remove wtA from disk (simulate deleted/moved worktree without DB update).
+	if out, rmErr := exec.Command("git", "-C", repoA, "worktree", "remove", "--force", wtA).CombinedOutput(); rmErr != nil {
+		t.Fatalf("git worktree remove: %v\n%s", rmErr, out)
+	}
+	if _, statErr := os.Stat(wtA); !os.IsNotExist(statErr) {
+		// Fallback: brutal removal.
+		_ = os.RemoveAll(wtA)
+	}
+
+	updates, err := UpdateFeature(db, featureName)
+	if err != nil {
+		t.Fatalf("UpdateFeature must not error on missing worktree: %v", err)
+	}
+	if len(updates) != 2 {
+		t.Fatalf("expected 2 updates, got %d", len(updates))
+	}
+
+	byRepo := make(map[string]FeatureRepoUpdate, 2)
+	for _, u := range updates {
+		byRepo[u.RepoName] = u
+	}
+
+	// repo-a must report FFMissing.
+	a := byRepo["repo-a"]
+	if a.Result.Outcome != git.FFMissing {
+		t.Fatalf("repo-a: expected FFMissing, got %q", a.Result.Outcome)
+	}
+
+	// repo-b must still be processed (FFUpToDate expected).
+	b := byRepo["repo-b"]
+	if b.Result.Outcome != git.FFUpToDate {
+		t.Fatalf("repo-b: expected FFUpToDate after missing-wt sibling, got %q (detail: %s)", b.Result.Outcome, b.Result.Detail)
+	}
+}
+
 // TestFeature_MixedBranchParkResumeRoundTrip verifies that a feature whose two
 // repos sit on DIFFERENT branches survives a full park→resume cycle:
 //   - ParkFeature removes both worktrees but leaves both branches in their repos

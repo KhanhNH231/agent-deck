@@ -286,6 +286,72 @@ func DeleteFeature(db *statedb.StateDB, name string) error {
 	return db.DeleteFeature(f.ID)
 }
 
+// FeatureRepoUpdate pairs a repo with its fast-forward outcome.
+type FeatureRepoUpdate struct {
+	RepoName string
+	Result   git.FFResult
+}
+
+// UpdateFeature fetches + fast-forwards every repo worktree of an ACTIVE
+// feature from its branch's upstream. ff-only and clean-tree gated per repo
+// (see git.FastForwardWorktree); skips are reported as outcomes, not errors.
+// Returns an error only when the feature is parked or cannot be looked up.
+// Per-repo plumbing failures are collected as outcomes; one broken repo never
+// aborts the rest.
+func UpdateFeature(db *statedb.StateDB, name string) ([]FeatureRepoUpdate, error) {
+	f, repos, err := db.GetFeatureByName(name)
+	if err != nil {
+		return nil, fmt.Errorf("update: %w", err)
+	}
+	if f.State == FeatureStateParked {
+		return nil, fmt.Errorf("feature %q is parked — resume first", name)
+	}
+
+	results := make([]FeatureRepoUpdate, 0, len(repos))
+	for _, r := range repos {
+		// Missing worktree dir on disk: report as FFMissing, keep going.
+		if r.WorktreePath == "" {
+			results = append(results, FeatureRepoUpdate{
+				RepoName: r.RepoName,
+				Result: git.FFResult{
+					Outcome: git.FFMissing,
+					Detail:  "worktree dir missing — try feature resume",
+				},
+			})
+			continue
+		}
+		if _, err := os.Stat(r.WorktreePath); os.IsNotExist(err) {
+			results = append(results, FeatureRepoUpdate{
+				RepoName: r.RepoName,
+				Result: git.FFResult{
+					Outcome: git.FFMissing,
+					Detail:  "worktree dir missing — try feature resume",
+				},
+			})
+			continue
+		}
+
+		res, ffErr := git.FastForwardWorktree(r.WorktreePath)
+		if ffErr != nil {
+			// Plumbing failure: record detail but keep going with remaining repos.
+			outcome := res.Outcome
+			if outcome == "" {
+				outcome = git.FFFetchFailed
+			}
+			results = append(results, FeatureRepoUpdate{
+				RepoName: r.RepoName,
+				Result:   git.FFResult{Outcome: outcome, Detail: ffErr.Error()},
+			})
+			continue
+		}
+		results = append(results, FeatureRepoUpdate{
+			RepoName: r.RepoName,
+			Result:   res,
+		})
+	}
+	return results, nil
+}
+
 // pathWithin reports whether path is dir or inside dir.
 func pathWithin(path, dir string) bool {
 	rel, err := filepath.Rel(dir, path)
