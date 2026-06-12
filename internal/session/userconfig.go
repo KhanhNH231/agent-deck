@@ -1352,7 +1352,22 @@ type CrushSettings struct {
 type WorkspaceSettings struct {
 	// Root is the workspace root directory, e.g. "~/Documents/Projects/workspaces".
 	Root string `toml:"root"`
+
+	// AutoUpdate enables background ff-pull of feature branches while their
+	// sessions are NOT running. Default: false (opt-in). E5.
+	AutoUpdate bool `toml:"auto_update"`
+
+	// AutoUpdateIntervalMinutes is how often (in minutes) each feature branch
+	// is eligible for a background update. Values below 5 are clamped to 5.
+	// Default: 30.
+	AutoUpdateIntervalMinutes int `toml:"auto_update_interval_minutes"`
 }
+
+// defaultAutoUpdateIntervalMinutes is the fallback when the field is unset (0).
+const defaultAutoUpdateIntervalMinutes = 30
+
+// minAutoUpdateIntervalMinutes is the floor enforced by AutoUpdateInterval.
+const minAutoUpdateIntervalMinutes = 5
 
 // Enabled reports whether the managed workspace root is configured.
 func (w WorkspaceSettings) Enabled() bool {
@@ -1362,6 +1377,25 @@ func (w WorkspaceSettings) Enabled() bool {
 // RootDir returns the workspace root with env vars and ~ expanded.
 func (w WorkspaceSettings) RootDir() string {
 	return ExpandPath(strings.TrimSpace(w.Root))
+}
+
+// AutoUpdateEnabled reports whether background feature-branch ff-pull is active.
+func (w WorkspaceSettings) AutoUpdateEnabled() bool {
+	return w.AutoUpdate
+}
+
+// AutoUpdateInterval returns the configured poll interval for background
+// feature updates, clamped to a minimum of 5 minutes. Unset (0) defaults to
+// 30 minutes.
+func (w WorkspaceSettings) AutoUpdateInterval() time.Duration {
+	mins := w.AutoUpdateIntervalMinutes
+	if mins <= 0 {
+		mins = defaultAutoUpdateIntervalMinutes
+	}
+	if mins < minAutoUpdateIntervalMinutes {
+		mins = minAutoUpdateIntervalMinutes
+	}
+	return time.Duration(mins) * time.Minute
 }
 
 // RepoDef is one entry of the [[repos]] manifest.

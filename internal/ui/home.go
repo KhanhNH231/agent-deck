@@ -393,6 +393,10 @@ type Home struct {
 	// PERFORMANCE: Only update statuses when user is actively interacting
 	lastUserInputTime time.Time // When user last pressed a key
 
+	// E5: background auto-update — per-feature last-attempt timestamps.
+	// Keyed by WorktreeBranch (feature name). In-memory only; resets on restart.
+	autoUpdateLastAttempt map[string]time.Time
+
 	// Double ESC to quit (#28) - for non-English keyboard users
 	lastEscTime time.Time // When ESC was last pressed (double-tap within 500ms quits)
 
@@ -865,11 +869,13 @@ type worktreeDirtyCheckMsg struct {
 }
 
 // featureUpdateResultMsg is sent when the async ff-pull update for a feature completes.
+// auto is true for background-triggered updates (E5) and false for manual U-hotkey (E4).
 type featureUpdateResultMsg struct {
 	sessionID   string
 	featureName string
 	updates     []session.FeatureRepoUpdate
 	err         error
+	auto        bool // true = background auto-update; false = manual (U hotkey)
 }
 
 // worktreeFinishResultMsg is sent when the worktree finish operation completes
@@ -4793,7 +4799,65 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			rev := session.NewReviver()
 			_ = rev.ReviveAll(instances)
 		}(append([]*session.Instance(nil), h.instances...))
-		return h, h.reviverTick()
+
+		// E5: background auto-update — check eligible feature branches.
+		var autoUpdateCmds []tea.Cmd
+		wsCfg := session.GetWorkspaceSettings()
+		if wsCfg.AutoUpdateEnabled() {
+			interval := wsCfg.AutoUpdateInterval()
+			now := time.Now()
+
+			// Group worktree sessions by feature name (= WorktreeBranch).
+			type featureInfo struct {
+				statuses []session.Status
+			}
+			featureMap := make(map[string]*featureInfo)
+			h.instancesMu.RLock()
+			for _, inst := range h.instances {
+				if inst.WorktreeBranch == "" {
+					continue
+				}
+				info := featureMap[inst.WorktreeBranch]
+				if info == nil {
+					info = &featureInfo{}
+					featureMap[inst.WorktreeBranch] = info
+				}
+				info.statuses = append(info.statuses, inst.GetStatusThreadSafe())
+			}
+			h.instancesMu.RUnlock()
+
+			if h.autoUpdateLastAttempt == nil {
+				h.autoUpdateLastAttempt = make(map[string]time.Time)
+			}
+
+			for featureName, info := range featureMap {
+				lastAttempt := h.autoUpdateLastAttempt[featureName]
+				if !autoUpdateDue(true, info.statuses, lastAttempt, interval, now) {
+					continue
+				}
+				h.autoUpdateLastAttempt[featureName] = now
+				fn := featureName // capture
+				autoUpdateCmds = append(autoUpdateCmds, func() tea.Msg {
+					db := statedb.GetGlobal()
+					if db == nil {
+						return featureUpdateResultMsg{
+							featureName: fn,
+							err:         fmt.Errorf("auto-update: state db unavailable"),
+							auto:        true,
+						}
+					}
+					updates, err := session.UpdateFeature(db, fn)
+					return featureUpdateResultMsg{
+						featureName: fn,
+						updates:     updates,
+						err:         err,
+						auto:        true,
+					}
+				})
+			}
+		}
+
+		return h, tea.Batch(append([]tea.Cmd{h.reviverTick()}, autoUpdateCmds...)...)
 
 	case focusPollTickMsg:
 		// Re-schedule the focus-request poll loop. No-op tick: nothing was a new
@@ -5220,6 +5284,8 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case featureUpdateResultMsg:
 		if msg.err != nil {
+			// Always surface errors — both manual and auto. Auto errors are rare
+			// (feature-level fetch failure) and actionable, so toast is warranted.
 			h.setError(msg.err)
 			return h, nil
 		}
@@ -5234,8 +5300,18 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 				skipped++
 			}
 		}
-		h.setError(fmt.Errorf("feature %s: %d updated, %d skipped, %d up-to-date",
-			msg.featureName, updated, skipped, upToDate))
+		if msg.auto {
+			// Auto-update: only toast when at least one repo was actually updated.
+			// Silent when nothing changed — no 30-minute noise.
+			if updated > 0 {
+				h.setError(fmt.Errorf("auto-update: feature %s: %d updated, %d skipped, %d up-to-date",
+					msg.featureName, updated, skipped, upToDate))
+			}
+		} else {
+			// Manual (U hotkey): always toast so the user gets confirmation.
+			h.setError(fmt.Errorf("feature %s: %d updated, %d skipped, %d up-to-date",
+				msg.featureName, updated, skipped, upToDate))
+		}
 		return h, nil
 
 	case worktreeFinishResultMsg:

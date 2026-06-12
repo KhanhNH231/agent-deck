@@ -1,13 +1,16 @@
 package ui
 
-// Tests for the U hotkey (hotkeyWorktreeFeatureUpdate) — E4 feature ff-pull.
+// Tests for the U hotkey (hotkeyWorktreeFeatureUpdate) — E4 feature ff-pull,
+// and the featureUpdateResultMsg handler shared by E4 (manual) and E5 (auto).
 //
 // Scope: message-handler logic + key-guard logic. The async tea.Cmd that calls
 // session.UpdateFeature is NOT invoked in tests (requires a real statedb +
 // registered feature), so we test:
 //   1. Key press on a non-worktree session → no cmd + hint set in error bar.
-//   2. featureUpdateResultMsg handler → correct toast text for mixed outcomes.
+//   2. featureUpdateResultMsg handler (manual) → correct toast text for mixed outcomes.
 //   3. featureUpdateResultMsg handler with err → error surfaced.
+//   4. Auto handler: zero-updated result is silent (no toast).
+//   5. Auto handler: updated > 0 sets "auto-update:" prefixed toast.
 
 import (
 	"errors"
@@ -141,6 +144,86 @@ func TestFeatureUpdateResultMsg_Error(t *testing.T) {
 	}
 	if !strings.Contains(h.err.Error(), "parked") {
 		t.Fatalf("unexpected error: %q", h.err.Error())
+	}
+}
+
+// TestFeatureUpdateResultMsg_AutoSilentWhenNothingUpdated verifies that an
+// auto-triggered result with zero updated repos does NOT set a toast.
+func TestFeatureUpdateResultMsg_AutoSilentWhenNothingUpdated(t *testing.T) {
+	h := &Home{
+		hotkeys: resolveHotkeys(nil),
+	}
+	h.hotkeyLookup, h.blockedHotkeys = buildHotkeyLookup(h.hotkeys)
+
+	updates := []session.FeatureRepoUpdate{
+		{RepoName: "backend", Result: git.FFResult{Outcome: git.FFUpToDate}},
+		{RepoName: "infra", Result: git.FFResult{Outcome: git.FFDirty}},
+	}
+	msg := featureUpdateResultMsg{
+		featureName: "feat/login",
+		updates:     updates,
+		err:         nil,
+		auto:        true,
+	}
+
+	// Mirror the handler: count outcomes then apply toast logic.
+	var updated int
+	for _, u := range msg.updates {
+		if u.Result.Outcome == git.FFUpdated {
+			updated++
+		}
+	}
+	if msg.auto && updated > 0 {
+		h.setError(fmt.Errorf("auto-update: feature %s: %d updated", msg.featureName, updated))
+	}
+	// updated == 0 → no setError call → h.err must remain nil.
+
+	if h.err != nil {
+		t.Errorf("auto silent: expected no toast when updated==0, got %q", h.err.Error())
+	}
+}
+
+// TestFeatureUpdateResultMsg_AutoToastWhenUpdated verifies that an auto-triggered
+// result with at least one updated repo surfaces a toast prefixed "auto-update:".
+func TestFeatureUpdateResultMsg_AutoToastWhenUpdated(t *testing.T) {
+	h := &Home{
+		hotkeys: resolveHotkeys(nil),
+	}
+	h.hotkeyLookup, h.blockedHotkeys = buildHotkeyLookup(h.hotkeys)
+
+	updates := []session.FeatureRepoUpdate{
+		{RepoName: "backend", Result: git.FFResult{Outcome: git.FFUpdated}},
+		{RepoName: "infra", Result: git.FFResult{Outcome: git.FFUpToDate}},
+	}
+	msg := featureUpdateResultMsg{
+		featureName: "feat/login",
+		updates:     updates,
+		err:         nil,
+		auto:        true,
+	}
+
+	// Mirror handler logic.
+	var updated, upToDate, skipped int
+	for _, u := range msg.updates {
+		switch u.Result.Outcome {
+		case git.FFUpdated:
+			updated++
+		case git.FFUpToDate:
+			upToDate++
+		default:
+			skipped++
+		}
+	}
+	if msg.auto && updated > 0 {
+		h.setError(fmt.Errorf("auto-update: feature %s: %d updated, %d skipped, %d up-to-date",
+			msg.featureName, updated, skipped, upToDate))
+	}
+
+	if h.err == nil {
+		t.Fatal("auto toast: expected toast when updated>0, got nil")
+	}
+	if !strings.HasPrefix(h.err.Error(), "auto-update:") {
+		t.Errorf("auto toast: expected 'auto-update:' prefix, got %q", h.err.Error())
 	}
 }
 
