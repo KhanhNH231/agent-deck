@@ -421,3 +421,104 @@ func TestExtendFeature_EmptyBranchRejected(t *testing.T) {
 		t.Fatalf("expected 1 repo row after rejection, got %d", len(repos))
 	}
 }
+
+// TestFeature_MixedBranchParkResumeRoundTrip verifies that a feature whose two
+// repos sit on DIFFERENT branches survives a full park→resume cycle:
+//   - ParkFeature removes both worktrees but leaves both branches in their repos
+//   - ResumeFeature recreates each worktree on its ORIGINAL per-repo branch
+//     (reads feature_repos.branch per row, never a feature-level branch)
+func TestFeature_MixedBranchParkResumeRoundTrip(t *testing.T) {
+	db := openFeatureTestDB(t)
+
+	// Two independent repos, each starting on main.
+	repoA := initFeatureTestRepo(t, "repo-a")
+	repoB := initFeatureTestRepo(t, "repo-b")
+
+	// Workspace layout mirrors what startTestFeature / FeatureWorktreePath use.
+	wsRoot, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const featureName = "mixed-branch-feature"
+	const branchA = "feat/line-a"
+	const branchB = "feat/line-b"
+
+	featureDir := git.FeatureDir(wsRoot, featureName)
+	wtA := git.FeatureWorktreePath(wsRoot, featureName, "repo-a")
+	wtB := git.FeatureWorktreePath(wsRoot, featureName, "repo-b")
+
+	// Create real worktrees on their respective branches.
+	if err := git.CreateWorktree(repoA, wtA, branchA); err != nil {
+		t.Fatalf("CreateWorktree repo-a: %v", err)
+	}
+	if err := git.CreateWorktree(repoB, wtB, branchB); err != nil {
+		t.Fatalf("CreateWorktree repo-b: %v", err)
+	}
+
+	_, err = RegisterFeature(db, featureName, featureDir, false, []FeatureRepo{
+		{RepoName: "repo-a", RepoPath: repoA, Branch: branchA, WorktreePath: wtA},
+		{RepoName: "repo-b", RepoPath: repoB, Branch: branchB, WorktreePath: wtB},
+	})
+	if err != nil {
+		t.Fatalf("RegisterFeature: %v", err)
+	}
+
+	// ── Park ────────────────────────────────────────────────────────────────
+	if err := ParkFeature(db, featureName, false); err != nil {
+		t.Fatalf("ParkFeature: %v", err)
+	}
+
+	// Both worktree dirs must be gone.
+	for _, wt := range []string{wtA, wtB} {
+		if _, err := os.Stat(wt); !os.IsNotExist(err) {
+			t.Fatalf("worktree %s should be gone after park, stat err = %v", wt, err)
+		}
+	}
+
+	// Both branches must still exist in their origin repos.
+	out := gitOut(t, repoA, "rev-parse", "--verify", branchA)
+	if strings.TrimSpace(out) == "" {
+		t.Fatalf("branch %s must survive park in repo-a", branchA)
+	}
+	out = gitOut(t, repoB, "rev-parse", "--verify", branchB)
+	if strings.TrimSpace(out) == "" {
+		t.Fatalf("branch %s must survive park in repo-b", branchB)
+	}
+
+	// Feature state must be parked.
+	f, _, err := db.GetFeatureByName(featureName)
+	if err != nil || f.State != FeatureStateParked {
+		t.Fatalf("expected state=parked, got state=%q err=%v", f.State, err)
+	}
+
+	// ── Resume ───────────────────────────────────────────────────────────────
+	if err := ResumeFeature(db, featureName); err != nil {
+		t.Fatalf("ResumeFeature: %v", err)
+	}
+
+	// Both worktrees must be back and checked out on their ORIGINAL branches.
+	for _, tc := range []struct {
+		wt     string
+		branch string
+	}{
+		{wtA, branchA},
+		{wtB, branchB},
+	} {
+		if _, err := os.Stat(tc.wt); err != nil {
+			t.Fatalf("worktree %s missing after resume: %v", tc.wt, err)
+		}
+		out, err := exec.Command("git", "-C", tc.wt, "rev-parse", "--abbrev-ref", "HEAD").Output()
+		if err != nil {
+			t.Fatalf("rev-parse HEAD in %s: %v", tc.wt, err)
+		}
+		if got := strings.TrimSpace(string(out)); got != tc.branch {
+			t.Fatalf("worktree %s HEAD = %q, want %q", tc.wt, got, tc.branch)
+		}
+	}
+
+	// Feature state must be active.
+	f, _, err = db.GetFeatureByName(featureName)
+	if err != nil || f.State != FeatureStateActive {
+		t.Fatalf("expected state=active after resume, got state=%q err=%v", f.State, err)
+	}
+}
