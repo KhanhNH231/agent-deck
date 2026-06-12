@@ -168,14 +168,16 @@ func ResumeFeature(db *statedb.StateDB, name string) error {
 // for it under <feature-root>/worktrees/<repoName> on the feature's branch
 // (created from baseRef when given, e.g. "origin/master") and appends the
 // repo to the feature's snapshot. Fails loudly; never symlinks a live repo.
-func ExtendFeature(db *statedb.StateDB, name, repoName, repoPath, baseRef string) error {
+// Returns a non-empty warning when the remote was unreachable during fetch
+// (offline degradation: worktree still created from stale tracking ref).
+func ExtendFeature(db *statedb.StateDB, name, repoName, repoPath, baseRef string) (warning string, err error) {
 	f, repos, err := db.GetFeatureByName(name)
 	if err != nil {
-		return fmt.Errorf("extend: %w", err)
+		return "", fmt.Errorf("extend: %w", err)
 	}
 	for _, r := range repos {
 		if r.RepoName == repoName || r.RepoPath == repoPath {
-			return fmt.Errorf("extend %q: repo %s already part of the feature", name, repoName)
+			return "", fmt.Errorf("extend %q: repo %s already part of the feature", name, repoName)
 		}
 	}
 	branch := name
@@ -183,24 +185,26 @@ func ExtendFeature(db *statedb.StateDB, name, repoName, repoPath, baseRef string
 		branch = repos[0].Branch
 	}
 	if !git.IsGitRepoOrBareProjectRoot(repoPath) {
-		return fmt.Errorf("extend %q: %s is not a git repository", name, repoPath)
+		return "", fmt.Errorf("extend %q: %s is not a git repository", name, repoPath)
 	}
 	repoRoot, err := git.GetWorktreeBaseRoot(repoPath)
 	if err != nil {
-		return fmt.Errorf("extend %q: resolve repo root: %w", name, err)
+		return "", fmt.Errorf("extend %q: resolve repo root: %w", name, err)
 	}
 
 	wtPath := filepath.Join(f.RootPath, "worktrees", repoName)
 	if err := os.MkdirAll(filepath.Dir(wtPath), 0o755); err != nil {
-		return fmt.Errorf("extend %q: %w", name, err)
+		return "", fmt.Errorf("extend %q: %w", name, err)
 	}
+	var warn string
 	if baseRef != "" {
-		if _, _, err := git.CreateWorktreeAtStartPoint(repoRoot, wtPath, branch, baseRef); err != nil {
-			return fmt.Errorf("extend %q: worktree %s: %w", name, repoName, err)
+		_, warn, err = git.CreateWorktreeAtStartPoint(repoRoot, wtPath, branch, baseRef)
+		if err != nil {
+			return "", fmt.Errorf("extend %q: worktree %s: %w", name, repoName, err)
 		}
 	} else {
 		if err := git.CreateWorktree(repoRoot, wtPath, branch); err != nil {
-			return fmt.Errorf("extend %q: worktree %s: %w", name, repoName, err)
+			return "", fmt.Errorf("extend %q: worktree %s: %w", name, repoName, err)
 		}
 	}
 
@@ -219,9 +223,9 @@ func ExtendFeature(db *statedb.StateDB, name, repoName, repoPath, baseRef string
 		// The worktree exists but the snapshot update failed — roll it back
 		// so disk and DB stay consistent.
 		_ = git.RemoveWorktree(repoRoot, wtPath, true)
-		return err
+		return "", err
 	}
-	return nil
+	return warn, nil
 }
 
 // MarkFeatureConductor flags a feature as conductor-orchestrated and

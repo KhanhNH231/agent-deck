@@ -114,9 +114,13 @@ func handleFeature(profile string, args []string) {
 		}
 		db := openDB()
 		defer db.Close()
-		if err := session.ExtendFeature(db, name, repoName, repoPath, baseRef); err != nil {
+		warning, err := session.ExtendFeature(db, name, repoName, repoPath, baseRef)
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
+		}
+		if warning != "" {
+			fmt.Fprintf(os.Stderr, "warning: %s\n", warning)
 		}
 		fmt.Printf("Extended %q with %s. Restart the feature's session(s) to pick up the new repo.\n", name, repoName)
 

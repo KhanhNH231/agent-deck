@@ -215,7 +215,7 @@ func TestExtendFeatureAddsRealWorktree(t *testing.T) {
 	_, featureDir, _, _ := startTestFeature(t, db, "login")
 	repoB := initFeatureTestRepo(t, "beta")
 
-	if err := ExtendFeature(db, "login", "beta", repoB, ""); err != nil {
+	if _, err := ExtendFeature(db, "login", "beta", repoB, ""); err != nil {
 		t.Fatalf("ExtendFeature: %v", err)
 	}
 
@@ -240,7 +240,89 @@ func TestExtendFeatureAddsRealWorktree(t *testing.T) {
 func TestExtendFeatureRejectsDuplicateRepo(t *testing.T) {
 	db := openFeatureTestDB(t)
 	_, _, repoA, _ := startTestFeature(t, db, "login")
-	if err := ExtendFeature(db, "login", "alpha", repoA, ""); err == nil {
+	if _, err := ExtendFeature(db, "login", "alpha", repoA, ""); err == nil {
 		t.Fatal("expected duplicate-repo rejection")
+	}
+}
+
+// setupRepoWithRemote creates a bare origin, clones it into repoName, seeds one
+// commit, pushes, so the clone has a real origin/<branch> tracking ref.
+// Returns (cloneDir). The remote URL is within tmp so it can be broken by
+// set-url to a nonexistent path.
+func setupRepoWithRemote(t *testing.T, repoName, branch string) string {
+	t.Helper()
+	tmp, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	originDir := filepath.Join(tmp, "origin.git")
+	if err := os.MkdirAll(originDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustGit := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
+		}
+	}
+
+	mustGit(originDir, "init", "--bare", "-b", branch)
+
+	cloneDir := filepath.Join(tmp, repoName)
+	if err := os.MkdirAll(cloneDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(cloneDir, "init", "-b", branch)
+	mustGit(cloneDir, "config", "user.email", "t@t")
+	mustGit(cloneDir, "config", "user.name", "t")
+	mustGit(cloneDir, "remote", "add", "origin", originDir)
+	if err := os.WriteFile(filepath.Join(cloneDir, "README.md"), []byte("seed"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(cloneDir, "add", ".")
+	mustGit(cloneDir, "commit", "-m", "seed")
+	mustGit(cloneDir, "push", "-u", "origin", branch)
+
+	return cloneDir
+}
+
+func TestExtendFeature_UnreachableRemoteWarnsAndProceeds(t *testing.T) {
+	db := openFeatureTestDB(t)
+	_, featureDir, _, _ := startTestFeature(t, db, "login")
+
+	// Set up a beta repo that has a real origin + remote-tracking ref for main.
+	betaRepo := setupRepoWithRemote(t, "beta", "main")
+
+	// Break the remote so fetch fails (offline simulation).
+	cmd := exec.Command("git", "-C", betaRepo, "remote", "set-url", "origin", "/nonexistent/gone.git")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("set-url: %v\n%s", err, out)
+	}
+
+	warning, err := ExtendFeature(db, "login", "beta", betaRepo, "origin/main")
+	if err != nil {
+		t.Fatalf("extend must proceed offline: %v", err)
+	}
+	if warning == "" {
+		t.Fatal("expected stale-ref warning from unreachable remote")
+	}
+
+	// Worktree must exist and be a real dir (not a symlink).
+	wtB := filepath.Join(featureDir, "worktrees", "beta")
+	fi, err := os.Lstat(wtB)
+	if err != nil {
+		t.Fatalf("beta worktree missing: %v", err)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		t.Fatal("beta worktree is a symlink — must be real")
+	}
+
+	// DB snapshot must include beta.
+	_, repos, err := db.GetFeatureByName("login")
+	if err != nil || len(repos) != 2 {
+		t.Fatalf("repos = %+v err=%v", repos, err)
 	}
 }
