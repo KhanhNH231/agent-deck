@@ -6027,9 +6027,6 @@ func (h *Home) handleNewDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		h.newDialog.Hide()
-		h.clearError()
-
 		geminiYoloMode := h.newDialog.IsGeminiYoloMode()
 		sandboxMode := h.newDialog.IsSandboxEnabled()
 		multiRepoPaths, multiRepoEnabled := h.newDialog.GetMultiRepoPaths()
@@ -6039,6 +6036,13 @@ func (h *Home) handleNewDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			path = multiRepoPaths[0]
 			additionalPaths = multiRepoPaths[1:]
 		}
+		// Capture per-repo branch overrides before the dialog is hidden.
+		// Zero overrides → identical to UniformBranches (see GetMultiRepoBranches).
+		allPaths := append([]string{path}, additionalPaths...)
+		multiRepoBranches := h.newDialog.GetMultiRepoBranches(branchName, allPaths)
+
+		h.newDialog.Hide()
+		h.clearError()
 
 		// Show immediate placeholder in UI while worktree + session is created async
 		var tempID string
@@ -6078,6 +6082,7 @@ func (h *Home) handleNewDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			launchModelID,
 			multiRepoEnabled,
 			additionalPaths,
+			multiRepoBranches,
 			parentSessionID,
 			parentProjectPath,
 			tempID,
@@ -7919,6 +7924,7 @@ func (h *Home) confirmCreateDirectory() tea.Cmd {
 		pendingLaunchModelID,
 		false,
 		nil,
+		nil, // no per-repo branch overrides (non-multi-repo path)
 		parentSessionID,
 		parentProjectPath,
 		"", // no placeholder — non-worktree sessions are fast
@@ -9142,6 +9148,7 @@ func (h *Home) createSessionInGroupWithWorktreeAndOptions(
 	launchModelID string,
 	multiRepoEnabled bool,
 	additionalPaths []string,
+	multiRepoBranches session.MultiRepoBranches,
 	parentSessionID, parentProjectPath string,
 	tempID string,
 ) tea.Cmd {
@@ -9271,7 +9278,13 @@ func (h *Home) createSessionInGroupWithWorktreeAndOptions(
 				}
 				inst.MultiRepoTempDir = parentDir
 
-				wtResult := session.CreateMultiRepoWorktrees(allPaths, parentDir, session.UniformBranches(allPaths, worktreeBranch), session.GetWorktreeSettings().SetupTimeout())
+				// Ensure branches map is populated. When multiRepoBranches is nil (non-dialog
+				// paths that don't support per-repo overrides) fall back to UniformBranches.
+				branches := multiRepoBranches
+				if branches == nil {
+					branches = session.UniformBranches(allPaths, worktreeBranch)
+				}
+				wtResult := session.CreateMultiRepoWorktrees(allPaths, parentDir, branches, session.GetWorktreeSettings().SetupTimeout())
 				if wtResult.Err != nil {
 					// A git repo could not be isolated. Abort rather than launch a
 					// session that silently aliases the live repo. Worktrees already
@@ -9553,10 +9566,10 @@ func (h *Home) quickCreateSession() tea.Cmd {
 		name, projectPath, command, groupPath,
 		"", "", "", // no worktree
 		geminiYoloMode, false, toolOptionsJSON,
-		nil,        // no extra claude args (recent-session path)
-		"",         // no claude startup query (recent-session path)
-		"",         // no explicit model override
-		false, nil, // no multi-repo
+		nil,             // no extra claude args (recent-session path)
+		"",              // no claude startup query (recent-session path)
+		"",              // no explicit model override
+		false, nil, nil, // no multi-repo, no per-repo overrides
 		"", "", // no parent
 		"", // no placeholder
 	)
@@ -9635,7 +9648,7 @@ func (h *Home) quickCreateSessionAt(projectPath string) tea.Cmd {
 		nil, // no extra claude args
 		"",  // no claude startup query
 		"",  // no explicit model override
-		false, nil,
+		false, nil, nil, // no multi-repo, no per-repo overrides
 		"", "",
 		"",
 	)

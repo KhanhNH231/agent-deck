@@ -202,10 +202,15 @@ type NewDialog struct {
 	pathCycler            session.CompletionCycler // Path autocomplete state.
 	suggestionsLineOffset int                      // Content line where suggestions overlay should appear.
 	// Multi-repo mode.
-	multiRepoEnabled    bool
-	multiRepoPaths      []string // All paths when multi-repo is active.
-	multiRepoPathCursor int      // Selected path index in the stacked list.
-	multiRepoEditing    bool     // True when editing a path entry.
+	multiRepoEnabled         bool
+	multiRepoPaths           []string          // All paths when multi-repo is active.
+	multiRepoPathCursor      int               // Selected path index in the stacked list.
+	multiRepoEditing         bool              // True when editing a path entry.
+	multiRepoBranchOverrides map[string]string // Per-path branch overrides; absent = use main branch.
+	// Inline per-repo branch override input (E3).
+	repoOverrideActive bool            // True while the inline branch input is open.
+	repoOverridePath   string          // The path whose branch is being overridden.
+	repoOverrideInput  textinput.Model // The inline branch input.
 	// Recent sessions picker.
 	recentSessions      []*statedb.RecentSessionRow
 	recentSessionCursor int
@@ -327,13 +332,19 @@ func NewNewDialog() *NewDialog {
 	branchInput.Placeholder = "feature/branch-name"
 	branchInput.CharLimit = 100
 
+	// Inline per-repo branch override input (E3).
+	repoOverrideInput := textinput.New()
+	repoOverrideInput.Placeholder = "branch-name"
+	repoOverrideInput.CharLimit = 100
+
 	dlg := &NewDialog{
 		nameInput:       nameInput,
 		pathInput:       pathInput,
 		commandInput:    commandInput,
 		modelInput:      modelInput,
-		branchInput:     branchInput,
-		branchPicker:    NewBranchPickerDialog(),
+		branchInput:       branchInput,
+		repoOverrideInput: repoOverrideInput,
+		branchPicker:      NewBranchPickerDialog(),
 		claudeOptions:   NewClaudeOptionsPanel(),
 		geminiOptions:   NewYoloOptionsPanel("Gemini", "YOLO mode - auto-approve all"),
 		codexOptions:    NewYoloOptionsPanel("Codex", "YOLO mode - bypass approvals and sandbox"),
@@ -409,6 +420,10 @@ func (d *NewDialog) ShowInGroup(groupPath, groupName, defaultPath string, conduc
 	d.multiRepoPaths = nil
 	d.multiRepoPathCursor = 0
 	d.multiRepoEditing = false
+	d.multiRepoBranchOverrides = nil
+	d.repoOverrideActive = false
+	d.repoOverridePath = ""
+	d.repoOverrideInput.SetValue("")
 	// Reset sandbox from global config default.
 	d.sandboxEnabled = false
 	d.inheritedExpanded = false
@@ -678,6 +693,10 @@ func (d *NewDialog) restoreSnapshot(s *dialogSnapshot) {
 	d.multiRepoPaths = append([]string{}, s.multiRepoPaths...)
 	d.multiRepoPathCursor = 0
 	d.multiRepoEditing = false
+	d.multiRepoBranchOverrides = nil
+	d.repoOverrideActive = false
+	d.repoOverridePath = ""
+	d.repoOverrideInput.SetValue("")
 	d.conductorCursor = s.conductorCursor
 	d.updateToolOptions()
 	d.rebuildFocusTargets()
@@ -769,6 +788,10 @@ func (d *NewDialog) previewRecentSession(rs *statedb.RecentSessionRow) {
 	d.multiRepoPaths = nil
 	d.multiRepoPathCursor = 0
 	d.multiRepoEditing = false
+	d.multiRepoBranchOverrides = nil
+	d.repoOverrideActive = false
+	d.repoOverridePath = ""
+	d.repoOverrideInput.SetValue("")
 
 	d.rebuildFocusTargets()
 }
@@ -1095,6 +1118,32 @@ func (d *NewDialog) GetMultiRepoPaths() ([]string, bool) {
 	return paths, true
 }
 
+// setRepoBranchOverride sets or clears a per-repo branch override.
+// If branch equals mainBranch the override is removed (back to default).
+func (d *NewDialog) setRepoBranchOverride(path, branch, mainBranch string) {
+	if d.multiRepoBranchOverrides == nil {
+		d.multiRepoBranchOverrides = make(map[string]string)
+	}
+	if branch == mainBranch {
+		delete(d.multiRepoBranchOverrides, path)
+	} else {
+		d.multiRepoBranchOverrides[path] = branch
+	}
+}
+
+// GetMultiRepoBranches returns a session.MultiRepoBranches for all allPaths
+// using mainBranch as the default and applying any per-repo overrides on top.
+// Zero overrides produces a map value-identical to UniformBranches.
+func (d *NewDialog) GetMultiRepoBranches(mainBranch string, allPaths []string) session.MultiRepoBranches {
+	branches := session.UniformBranches(allPaths, mainBranch)
+	for path, override := range d.multiRepoBranchOverrides {
+		if override != "" {
+			branches[path] = override
+		}
+	}
+	return branches
+}
+
 // IsMultiRepoEditing returns true when the user is editing a path in the multi-repo list.
 // Used by the parent to prevent enter from submitting the form.
 func (d *NewDialog) IsMultiRepoEditing() bool {
@@ -1409,6 +1458,9 @@ func isNewDialogShiftTabKey(msg tea.KeyMsg) bool {
 // isTextInputFocused returns true when a text input field is actively receiving
 // keystrokes. Single-letter shortcuts must be suppressed in this state.
 func (d *NewDialog) isTextInputFocused() bool {
+	if d.repoOverrideActive {
+		return true
+	}
 	switch d.currentTarget() {
 	case focusName, focusPath, focusModel, focusBranch:
 		return true
@@ -1861,6 +1913,13 @@ func (d *NewDialog) Update(msg tea.Msg) (*NewDialog, tea.Cmd) {
 			return d, nil
 
 		case "esc":
+			if d.repoOverrideActive {
+				// Cancel the inline branch-override input without saving.
+				d.repoOverrideActive = false
+				d.repoOverridePath = ""
+				d.repoOverrideInput.SetValue("")
+				return d, nil
+			}
 			if d.multiRepoEditing {
 				// Cancel editing, revert to the stored value
 				d.multiRepoEditing = false
@@ -1881,6 +1940,17 @@ func (d *NewDialog) Update(msg tea.Msg) (*NewDialog, tea.Cmd) {
 			return d, nil
 
 		case "enter":
+			if d.repoOverrideActive {
+				// Save the override (or clear it if equal to the main branch).
+				mainBranch := strings.TrimSpace(d.branchInput.Value())
+				override := strings.TrimSpace(d.repoOverrideInput.Value())
+				d.setRepoBranchOverride(d.repoOverridePath, override, mainBranch)
+				d.repoOverrideActive = false
+				d.repoOverridePath = ""
+				d.repoOverrideInput.SetValue("")
+				d.ClearError()
+				return d, nil
+			}
 			if cur == focusPath {
 				d.suggestionsActive = true
 				d.suggestionsHidden = false
@@ -1974,8 +2044,33 @@ func (d *NewDialog) Update(msg tea.Msg) (*NewDialog, tea.Cmd) {
 				return d, nil
 			}
 
+		case "b":
+			if cur == focusMultiRepo && d.multiRepoEnabled && !d.multiRepoEditing && !d.repoOverrideActive {
+				if d.multiRepoPathCursor < len(d.multiRepoPaths) {
+					path := strings.TrimSpace(d.multiRepoPaths[d.multiRepoPathCursor])
+					if path != "" {
+						path = session.ExpandPath(strings.Trim(path, "'\""))
+					}
+					if path == "" || !git.IsGitRepo(path) {
+						d.SetError("branch override only applies to git repos")
+						return d, nil
+					}
+					// Open the inline override input prefilled with the main branch value.
+					// The main branch acts as the "default" — the user edits it to
+					// set a custom branch, or leaves it to clear back to default.
+					d.repoOverrideActive = true
+					d.repoOverridePath = path
+					mainBranch := strings.TrimSpace(d.branchInput.Value())
+					d.repoOverrideInput.SetValue(mainBranch)
+					d.repoOverrideInput.SetCursor(len(mainBranch))
+					d.repoOverrideInput.Focus()
+					d.ClearError()
+				}
+				return d, nil
+			}
+
 		case "a":
-			if cur == focusMultiRepo && d.multiRepoEnabled && !d.multiRepoEditing {
+			if cur == focusMultiRepo && d.multiRepoEnabled && !d.multiRepoEditing && !d.repoOverrideActive {
 				// Pre-fill with parent directory of the last path
 				defaultPath := ""
 				for i := len(d.multiRepoPaths) - 1; i >= 0; i-- {
@@ -2008,7 +2103,7 @@ func (d *NewDialog) Update(msg tea.Msg) (*NewDialog, tea.Cmd) {
 			}
 
 		case "d":
-			if cur == focusMultiRepo && d.multiRepoEnabled && !d.multiRepoEditing && len(d.multiRepoPaths) > 1 {
+			if cur == focusMultiRepo && d.multiRepoEnabled && !d.multiRepoEditing && !d.repoOverrideActive && len(d.multiRepoPaths) > 1 {
 				d.multiRepoPaths = append(d.multiRepoPaths[:d.multiRepoPathCursor], d.multiRepoPaths[d.multiRepoPathCursor+1:]...)
 				if d.multiRepoPathCursor >= len(d.multiRepoPaths) {
 					d.multiRepoPathCursor = len(d.multiRepoPaths) - 1
@@ -2098,6 +2193,11 @@ func (d *NewDialog) Update(msg tea.Msg) (*NewDialog, tea.Cmd) {
 			d.filterModelSuggestions()
 		}
 	case focusMultiRepo:
+		// When the inline branch-override input is open, forward keystrokes to it.
+		if d.repoOverrideActive {
+			d.repoOverrideInput, cmd = d.repoOverrideInput.Update(msg)
+			return d, cmd
+		}
 		// When editing a multi-repo path, forward keystrokes to pathInput.
 		if d.multiRepoEditing {
 			oldValue := d.pathInput.Value()
@@ -2266,6 +2366,14 @@ func (d *NewDialog) View() string {
 		}
 		content.WriteString("\n")
 		if pathFocused {
+			overrideSuffix := func(p string) string {
+				expanded := session.ExpandPath(strings.Trim(strings.TrimSpace(p), "'\""))
+				if override, ok := d.multiRepoBranchOverrides[expanded]; ok && override != "" {
+					return "@" + override
+				}
+				return ""
+			}
+			overrideSuffixStyle := lipgloss.NewStyle().Foreground(ColorComment)
 			for i, p := range d.multiRepoPaths {
 				isSelected := i == d.multiRepoPathCursor
 				prefix := "    "
@@ -2276,32 +2384,53 @@ func (d *NewDialog) View() string {
 					content.WriteString(fmt.Sprintf("%s%d. ", prefix, i+1))
 					content.WriteString(d.pathInput.View())
 					content.WriteString("\n")
+				} else if isSelected && d.repoOverrideActive {
+					// Inline branch override input.
+					content.WriteString(fmt.Sprintf("%s%d. %s  branch: ", prefix, i+1, p))
+					content.WriteString(d.repoOverrideInput.View())
+					content.WriteString("\n")
 				} else {
 					display := p
 					if display == "" {
 						display = "(empty)"
 					}
+					suffix := overrideSuffix(p)
 					if isSelected {
-						content.WriteString(lipgloss.NewStyle().Foreground(ColorCyan).Bold(true).Render(
-							fmt.Sprintf("%s%d. %s", prefix, i+1, display)))
+						row := fmt.Sprintf("%s%d. %s", prefix, i+1, display)
+						content.WriteString(lipgloss.NewStyle().Foreground(ColorCyan).Bold(true).Render(row))
+						if suffix != "" {
+							content.WriteString(overrideSuffixStyle.Render(suffix))
+						}
 					} else {
-						content.WriteString(dimStyle.Render(
-							fmt.Sprintf("%s%d. %s", prefix, i+1, display)))
+						row := fmt.Sprintf("%s%d. %s", prefix, i+1, display)
+						content.WriteString(dimStyle.Render(row))
+						if suffix != "" {
+							content.WriteString(overrideSuffixStyle.Render(suffix))
+						}
 					}
 					content.WriteString("\n")
 				}
 			}
-			content.WriteString(dimStyle.Render("    [a: add, d: remove, enter: edit, ↑↓: navigate]"))
+			if d.repoOverrideActive {
+				content.WriteString(dimStyle.Render("    Enter save │ Esc cancel"))
+			} else {
+				content.WriteString(dimStyle.Render("    [a: add, d: remove, b: branch, enter: edit, ↑↓: navigate]"))
+			}
 			content.WriteString("\n")
 			// Record line offset for suggestions overlay (rendered after dialog is placed).
 			d.suggestionsLineOffset = strings.Count(content.String(), "\n")
 		} else {
+			overrideSuffixStyle := lipgloss.NewStyle().Foreground(ColorComment)
 			for i, p := range d.multiRepoPaths {
 				display := p
 				if display == "" {
 					display = "(empty)"
 				}
 				content.WriteString(dimStyle.Render(fmt.Sprintf("    %d. %s", i+1, display)))
+				expanded := session.ExpandPath(strings.Trim(strings.TrimSpace(p), "'\""))
+				if override, ok := d.multiRepoBranchOverrides[expanded]; ok && override != "" {
+					content.WriteString(overrideSuffixStyle.Render("@" + override))
+				}
 				content.WriteString("\n")
 			}
 		}
@@ -2600,6 +2729,12 @@ func (d *NewDialog) View() string {
 		}
 	} else if cur == focusConductor {
 		helpText = "↑↓ select parent │ Tab next │ Enter create │ Esc cancel"
+	} else if cur == focusMultiRepo && d.multiRepoEnabled {
+		if d.repoOverrideActive {
+			helpText = "Type branch │ Enter save │ Esc cancel"
+		} else {
+			helpText = "a: add │ d: remove │ b: branch override │ Enter edit │ ↑↓ navigate │ Esc cancel"
+		}
 	} else if cur == focusWorktree || cur == focusSandbox {
 		helpText = "Space toggle │ ↑↓ navigate │ Enter create │ Esc cancel"
 	} else if cur == focusInherited {
