@@ -25,6 +25,41 @@ var consecutiveDashesRe = regexp.MustCompile(`-+`)
 // so tests can shrink it.
 var fetchTimeout = 30 * time.Second
 
+// nonInteractiveFetchEnv returns the environment for a `git fetch` subprocess
+// with interactive credential prompts disabled. agent-deck issues fetches from
+// a raw-mode TUI; without this guard a passphrase-protected SSH key (not loaded
+// into ssh-agent) makes the child ssh open /dev/tty and block on a passphrase
+// prompt — stalling the fetch for the full fetchTimeout and corrupting the TUI.
+// Mirrors the BatchMode=yes stance the remote-session layer adopted in #1206.
+//
+//   - GIT_TERMINAL_PROMPT=0 suppresses git's own credential prompts (e.g. HTTPS).
+//   - BatchMode=yes makes ssh fail fast instead of prompting for a passphrase.
+//   - ConnectTimeout=10 bounds the dial.
+//
+// A user-provided GIT_SSH_COMMAND is preserved and the options appended, so
+// custom ssh wrappers / identity files keep working. When ssh fails fast the
+// caller falls back to the stale ref (offline behaviour; branch-features E1).
+func nonInteractiveFetchEnv() []string {
+	base := "ssh"
+	env := make([]string, 0, len(os.Environ())+2)
+	for _, kv := range os.Environ() {
+		switch {
+		case strings.HasPrefix(kv, "GIT_TERMINAL_PROMPT="):
+			// Replaced below; drop the inherited value.
+		case strings.HasPrefix(kv, "GIT_SSH_COMMAND="):
+			if v := strings.TrimSpace(strings.TrimPrefix(kv, "GIT_SSH_COMMAND=")); v != "" {
+				base = v
+			}
+		default:
+			env = append(env, kv)
+		}
+	}
+	return append(env,
+		"GIT_TERMINAL_PROMPT=0",
+		fmt.Sprintf("GIT_SSH_COMMAND=%s -o BatchMode=yes -o ConnectTimeout=10", base),
+	)
+}
+
 // Worktree represents a git worktree
 type Worktree struct {
 	Path   string // Filesystem path to the worktree
@@ -806,6 +841,7 @@ func freshOriginDefaultBranchRef(repoDir string) (string, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
 	defer cancel()
 	fetch := exec.CommandContext(ctx, "git", "-C", repoDir, "fetch", "--quiet", remote, defaultBranch)
+	fetch.Env = nonInteractiveFetchEnv()
 	if err := fetch.Run(); err != nil {
 		return "", false
 	}
@@ -840,6 +876,7 @@ func fetchRemoteShapedRef(repoDir, ref string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
 	defer cancel()
 	fetch := exec.CommandContext(ctx, "git", "-C", repoDir, "fetch", "--quiet", remote, branch)
+	fetch.Env = nonInteractiveFetchEnv()
 	if err := fetch.Run(); err != nil {
 		return fmt.Sprintf("fetch %s %s failed, branching from possibly-stale ref %s", remote, branch, ref)
 	}
